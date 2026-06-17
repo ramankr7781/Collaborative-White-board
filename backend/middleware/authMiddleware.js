@@ -4,11 +4,17 @@ const redisClient =
 
 const authMiddleware =
   async (req,res,next) => {
+    console.log("AUTH HIT");
 
   try {
 
     const authHeader =
       req.headers.authorization;
+
+      console.log(
+  "Header:",
+  authHeader
+);
 
     if (!authHeader) {
       return res.status(401).json({
@@ -39,6 +45,7 @@ const authMiddleware =
     req.user = decoded;
 
     next();
+    console.log("NEXT CALLED");
 
   } catch (error) {
     console.log(error);

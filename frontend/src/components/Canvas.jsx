@@ -394,7 +394,7 @@ function drawElement(ctx, el, opts = {}) {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 function Canvas({
-  elements, setElements,boardId,
+  elements, setElements,boardId,cursors,
 }) {
   const canvasRef = useRef(null);
 
@@ -454,8 +454,23 @@ function Canvas({
         const el = elements.find((el) => el.id === selectedId);
         if (!el) return;
         // Push a "delete" undo record
+
+        const updatedElements =elements.filter(
+            (el) => el.id !== selectedId
+          );
+
+
         setRedoStack([]);
-        setElements((prev) => prev.filter((el) => el.id !== selectedId));
+        setElements(updatedElements);
+
+        socket.emit("delete-element",
+          {
+            boardId,
+            elements: updatedElements,
+          }
+        );
+
+
         // Store the deleted element so undo can restore it
         setUndoRecord({ action: "delete", element: el });
         setSelectedId(null);
@@ -473,42 +488,136 @@ function Canvas({
 
   // ── Central undo logic ────────────────────────────────────────────────────
   const undo = () => {
-    setPreviewShape(null);
-    if (undoRecord) {
-      // Handle tagged undo records (delete, move, resize)
-      if (undoRecord.action === "delete") {
-        setElements((prev) => [...prev, undoRecord.element]);
-        setUndoRecord(null);
-        return;
+      setPreviewShape(null);
+
+      if (undoRecord) {
+
+        // Undo Delete
+        if (undoRecord.action === "delete") {
+
+          const updatedElements = [...elements,undoRecord.element,];
+
+          setElements(updatedElements);
+
+          socket.emit("update-elements",
+            {
+              boardId,
+              elements: updatedElements,
+            }
+          );
+
+          setUndoRecord(null);
+          return;
+        }
+
+        // Undo Move / Resize
+        if (undoRecord.action === "move" ||undoRecord.action === "resize") {
+
+          const updatedElements =
+            elements.map((el) =>
+              el.id === undoRecord.id
+                ? undoRecord.before
+                : el
+            );
+
+          setElements(updatedElements);
+
+          socket.emit(
+            "update-elements",
+            {
+              boardId,
+              elements: updatedElements,
+            }
+          );
+
+          setRedoStack((prev) => [
+            ...prev,
+            undoRecord,
+          ]);
+
+          setUndoRecord(null);
+          return;
+        }
       }
-      if (undoRecord.action === "move" || undoRecord.action === "resize") {
-        setElements((prev) =>
-          prev.map((el) => (el.id === undoRecord.id ? undoRecord.before : el))
-        );
-        setRedoStack((prev) => [...prev, undoRecord]);
-        setUndoRecord(null);
-        return;
-      }
-    }
-    if (elements.length === 0) return;
-    const last = elements[elements.length - 1];
-    setRedoStack((prev) => [...prev, last]);
-    setElements((prev) => prev.slice(0, -1));
+
+      if (elements.length === 0) return;
+
+      const last =
+        elements[elements.length - 1];
+
+      setRedoStack((prev) => [
+        ...prev,
+        last,
+      ]);
+
+      const updatedElements =
+        elements.slice(0, -1);
+
+      setElements(updatedElements);
+
+      socket.emit(
+        "update-elements",
+        {
+          boardId,
+          elements: updatedElements,
+        }
+      );
   };
 
   const redo = () => {
-    setPreviewShape(null);
-    if (redoStack.length === 0) return;
-    const last = redoStack[redoStack.length - 1];
-    // Tagged redo
-    if (last && last.action === "move") {
-      setElements((prev) => prev.map((el) => (el.id === last.id ? last.after : el)));
-      setRedoStack((prev) => prev.slice(0, -1));
-      return;
+      setPreviewShape(null);
+
+      if (redoStack.length === 0) return;
+
+      const last =redoStack[redoStack.length - 1];
+
+      // Move/Resize Redo
+      if (last &&(last.action === "move" ||last.action === "resize")) {
+
+        const updatedElements =
+          elements.map((el) =>
+            el.id === last.id
+              ? last.after
+              : el
+          );
+
+        setElements(updatedElements);
+
+        socket.emit("update-elements",
+          {
+            boardId,
+            elements: updatedElements,
+          }
+        );
+
+        setRedoStack((prev) =>
+          prev.slice(0, -1)
+        );
+
+        return;
     }
-    setElements((prev) => [...prev, last]);
-    setRedoStack((prev) => prev.slice(0, -1));
+
+    // Normal Redo
+      const updatedElements = [
+        ...elements,
+        last,
+      ];
+
+      setElements(updatedElements);
+
+      socket.emit(
+        "update-elements",
+        {
+          boardId,
+          elements: updatedElements,
+        }
+      );
+
+      setRedoStack((prev) =>
+        prev.slice(0, -1)
+      );
   };
+
 
   // ── Cursor style ──────────────────────────────────────────────────────────
   const getCursor = useCallback((mx, my) => {
@@ -526,6 +635,7 @@ function Canvas({
     }
     return "default";
   }, [tool, selectedId, elements]);
+
 
   // ── Redraw ────────────────────────────────────────────────────────────────
   const redrawCanvas = () => {
@@ -545,11 +655,13 @@ function Canvas({
     }
   };
 
+
   // ── Mouse event helpers ───────────────────────────────────────────────────
   const getPos = (e) => ({
     x: e.nativeEvent.offsetX,
     y: e.nativeEvent.offsetY,
   });
+
 
   // ── startDrawing ──────────────────────────────────────────────────────────
   const startDrawing = (e) => {
@@ -624,9 +736,18 @@ function Canvas({
     ctx.moveTo(mx, my);
   };
 
+
   // ── draw (mousemove) ──────────────────────────────────────────────────────
   const draw = (e) => {
     const { x: mx, y: my } = getPos(e);
+
+    socket.emit("cursor-move",
+      {
+        boardId,
+        x: mx,
+        y: my,
+      }
+    );
 
     // Update cursor
     canvasRef.current.style.cursor = getCursor(mx, my);
@@ -886,6 +1007,8 @@ function Canvas({
 
   const tools = ["pen","eraser","text","line","arrow","rectangle","square","circle","select"];
 
+  console.log(cursors);
+
   return (
     <div style={{ userSelect: "none", fontFamily: "system-ui, sans-serif" }}>
       {/* ── Toolbar ── */}
@@ -948,7 +1071,27 @@ function Canvas({
               onChange={(e) => setElements((prev) => prev.map((el) => el.id === sel.id ? { ...el, color: e.target.value } : el))}
               style={{ width: 28, height: 22, padding: 0 }} />
             <button style={{ ...btnStyle(false), fontSize: 12, color: "#dc2626" }}
-              onClick={() => { setElements((prev) => prev.filter((el) => el.id !== sel.id)); setSelectedId(null); }}>
+              onClick={() => {
+
+                  const updatedElements =
+                    elements.filter(
+                      (el) =>
+                        el.id !== sel.id
+                    );
+
+                  setElements(updatedElements);
+
+                  socket.emit(
+                    "delete-element",
+                    {
+                      boardId,
+                      elements: updatedElements,
+                    }
+                  );
+
+                  setSelectedId(null);
+                }}>
+
               Delete
             </button>
           </div>
@@ -1021,7 +1164,40 @@ function Canvas({
         {selectedId ? " · 1 selected (Delete key to remove, drag to move, drag handles to resize)" : ""}
         {tool === "text" ? " · Click canvas to add text, double-click existing text to edit" : ""}
       </div>
+
+      {Object.entries(cursors).map(
+  ([id, pos]) => (
+    <div
+      key={id}
+      style={{
+        position: "fixed",
+        left: `${pos.x}px`,
+        top: `${pos.y}px`,
+        width: "20px",
+        height: "20px",
+        background: "red",
+        borderRadius: "50%",
+        zIndex: 99999,
+        pointerEvents: "none",
+      }}
+    />
+  )
+)}
+<h1
+  style={{
+    position: "fixed",
+    top: 0,
+    right: 0,
+    zIndex: 99999,
+    background: "yellow"
+  }}
+>
+  {Object.keys(cursors).length}
+</h1>
     </div>
+
+
+ 
   );
 }
 

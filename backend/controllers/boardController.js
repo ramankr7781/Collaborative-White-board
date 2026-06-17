@@ -1,6 +1,6 @@
 const Board = require("../models/Board");
 const redisClient =require("../config/redis");
-
+const User =require("../models/User");
 
 const createBoard = async (req, res) => {
   try {
@@ -199,6 +199,69 @@ const getBoards = async (req, res) => {
   }
 };
 
+const inviteMember = async (req,res) => {
+        console.log("INVITE HIT");
+  try {
+    
+    const { email } = req.body;
+
+    const board =await Board.findById(req.params.id);
+
+    if (!board) {
+      return res
+        .status(404)
+        .json({
+          message:
+            "Board not found",
+        });
+    }
+
+    if (board.owner.toString()!== req.user.userId) {
+      return res
+        .status(403)
+        .json({
+          message:
+            "Not authorized",
+        });
+
+    }
+
+    const user =await User.findOne({email,});
+
+    if (!user) {
+      return res
+        .status(404)
+        .json({
+          message:
+            "User not found",
+        });
+    }
+
+
+    if (board.owner.toString() ===user._id.toString()) {
+        return res.status(400).json({message:"Owner cannot be invited",});
+    }
+
+
+    if (board.members.some((memberId) =>memberId.toString() ===user._id.toString())) {
+      return res
+        .status(400)
+        .json({
+          message:
+            "Already invited",
+        });
+    }
+
+
+    board.members.push(user._id);
+    await board.save();
+    res.json({message:"Member invited",});
+
+  } catch (error) {
+    res.status(500).json({message:error.message,});
+  }
+};
+
 
 module.exports = {
   createBoard,
@@ -206,4 +269,5 @@ module.exports = {
   updateBoard,
   deleteBoard,
   getBoards,
+  inviteMember,
 };

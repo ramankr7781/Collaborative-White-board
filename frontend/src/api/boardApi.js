@@ -34,4 +34,15 @@ export const getBoards = () =>
     axios.get(
         BASE_URL,
         getAuthConfig()
-    );
+);
+
+
+export const inviteMember = (
+  boardId,
+  email
+) =>
+  axios.post(
+    `${BASE_URL}/${boardId}/invite`,
+    { email },
+    getAuthConfig()
+  );

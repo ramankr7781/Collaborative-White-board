@@ -1,6 +1,6 @@
 import Canvas from "./components/Canvas";
 
-import { createBoard,updateBoard,getBoard,getBoards,deleteBoard } from "./api/boardApi";
+import { createBoard,updateBoard,getBoard,getBoards,deleteBoard,inviteMember } from "./api/boardApi";
 import { useState,useEffect} from "react";
 import { Navigate,useNavigate } from "react-router-dom";
 import { useParams } from "react-router-dom";
@@ -16,6 +16,9 @@ function App() {
   const navigate = useNavigate();
   const [boardTitle, setBoardTitle] =useState("");
   const token =localStorage.getItem("token");
+  const [usersCount,setUsersCount] =useState(0);
+  const [cursors, setCursors] =useState({});
+  const [inviteEmail, setInviteEmail] =useState("");
 
   const fetchBoards = async () => {
     try {
@@ -33,17 +36,56 @@ function App() {
     }, [token]);
 
 
+    useEffect(() => {
+
+      socket.connect();
+
+      if (id) {
+        socket.emit("join-board",{
+            boardId: id,
+            token:
+              localStorage.getItem(
+                "token"
+              ),
+          }
+        );
+      }
+
+      return () => {
+        socket.disconnect();
+      };
+
+    }, [id]);
+
+
   useEffect(() => {
-    socket.connect();
-    if (id) {
-      socket.emit("join-board",id);
-    }
+    socket.on("users-count",(count) => {
+        setUsersCount(count);
+      }
+    );
 
     return () => {
-      socket.disconnect();
+      socket.off("users-count");
     };
-  }, [id]);
 
+  }, []);
+
+
+  useEffect(() => {
+
+    socket.on("cursor-move",({ socketId, x, y }) => {
+        setCursors((prev) => ({
+          ...prev,
+          [socketId]: { x, y },
+        }));
+      }
+    );
+
+    return () => {
+      socket.off("cursor-move");
+    };
+
+  }, []);
 
 
   useEffect(() => {
@@ -113,6 +155,21 @@ function App() {
     };
 
   }, []);
+
+
+  useEffect(() => {
+
+      socket.on("delete-element",(elements) => {
+          setElements(elements);
+        }
+      );
+
+      return () => {
+        socket.off("delete-element");
+      };
+
+    }, []);
+
 
   //Auto Save Board after 2 seconds of inactivity
   useEffect(() => {
@@ -218,7 +275,7 @@ const handleSaveBoard = async () => {
   alert("Saved");
 };
 
-
+console.log(cursors);
 
   return (
     <>
@@ -292,27 +349,71 @@ const handleSaveBoard = async () => {
       </button>
 
 
-        <button
-  onClick={() => {
-    socket.emit(
-      "drawing",
-      {
-        boardId: id,
-        element: {
-          test: "hello"
-        }
-      }
-    );
-  }}
->
-  Test Socket
-</button>
+      <button
+        onClick={() => {
 
+          navigator.clipboard.writeText(
+            window.location.href
+          );
+
+          alert("Link Copied");
+
+        }}
+      >
+        Share Board
+      </button>
+
+        
+
+      <input
+        type="email"
+        placeholder="Invite Email"
+        value={inviteEmail}
+        onChange={(e) =>
+          setInviteEmail(
+            e.target.value
+          )
+        }
+      />
+
+    <button
+      onClick={async () => {
+        if (!id) {
+          alert("Select a board first");
+          return;
+        }
+
+        try {
+          await inviteMember(
+            id,
+            inviteEmail
+          );
+          alert("Member Invited");
+          setInviteEmail("");
+
+        } catch (error) {
+          console.log(error);
+
+          alert(
+            error.response?.data?.message ||
+            error.message ||
+            "Invite failed"
+          );
+        }
+      }}
+    >
+      Invite
+    </button>
+
+
+
+<h3>Users Online: {usersCount}</h3>
 
       <Canvas
         elements={elements}
         setElements={setElements}
         boardId={id}
+        cursors={cursors}
       />
     </>
   );
