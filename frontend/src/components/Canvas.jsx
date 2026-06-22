@@ -81,40 +81,87 @@ function hitTest(el, mx, my, forceSolid = false) {
   const PAD = (el.size ? el.size / 2 : 5) + 10;
   const b = getElementBounds(el);
 
-  if (mx < b.x - PAD || mx > b.x + b.width + PAD || my < b.y - PAD || my > b.y + b.height + PAD) {
+  // quick bounding-box reject
+  if (
+    mx < b.x - PAD ||
+    mx > b.x + b.width + PAD ||
+    my < b.y - PAD ||
+    my > b.y + b.height + PAD
+  ) {
     return false;
   }
 
   if (el.type === "freehand") {
-    if (el.isFilled || forceSolid) return true; // If filled, click anywhere inside bounds
+    if (el.isFilled || forceSolid) return true;
+
     for (let i = 0; i < el.points.length - 1; i++) {
-      if (pointToLineSegmentDist(mx, my, el.points[i].x, el.points[i].y, el.points[i + 1].x, el.points[i + 1].y) <= PAD) return true;
+      if (
+        pointToLineSegmentDist(
+          mx,
+          my,
+          el.points[i].x,
+          el.points[i].y,
+          el.points[i + 1].x,
+          el.points[i + 1].y
+        ) <= PAD
+      ) {
+        return true;
+      }
     }
-    return el.points.length === 1 && Math.hypot(mx - el.points[0].x, my - el.points[0].y) <= PAD;
+
+    return (
+      el.points.length === 1 &&
+      Math.hypot(mx - el.points[0].x, my - el.points[0].y) <= PAD
+    );
   }
 
   if (el.type === "line" || el.type === "arrow") {
-    return pointToLineSegmentDist(mx, my, el.start.x, el.start.y, el.end.x, el.end.y) <= PAD;
+    return (
+      pointToLineSegmentDist(
+        mx,
+        my,
+        el.start.x,
+        el.start.y,
+        el.end.x,
+        el.end.y
+      ) <= PAD
+    );
   }
 
   if (el.type === "circle") {
     const distToCenter = Math.hypot(mx - el.center.x, my - el.center.y);
-    if (el.isFilled || forceSolid) return distToCenter <= el.radius + PAD;
+
+    // if selecting/filling, allow click anywhere inside circle
+    if (el.isFilled || forceSolid) {
+      return distToCenter <= el.radius + PAD;
+    }
+
+    // otherwise only border click counts
     return Math.abs(distToCenter - el.radius) <= PAD;
   }
 
   if (el.type === "rectangle" || el.type === "square") {
+    // if selecting/filling, allow click anywhere inside rectangle
     if (el.isFilled || forceSolid) return true;
 
-    const minX = Math.min(el.start.x, el.end.x);
-    const maxX = Math.max(el.start.x, el.end.x);
-    const minY = Math.min(el.start.y, el.end.y);
-    const maxY = Math.max(el.start.y, el.end.y);
-
-    const top = pointToLineSegmentDist(mx, my, minX, minY, maxX, minY);
-    const bottom = pointToLineSegmentDist(mx, my, minX, maxY, maxX, maxY);
-    const left = pointToLineSegmentDist(mx, my, minX, minY, minX, maxY);
-    const right = pointToLineSegmentDist(mx, my, maxX, minY, maxX, maxY);
+    const top = pointToLineSegmentDist(mx, my, b.x, b.y, b.x + b.width, b.y);
+    const bottom = pointToLineSegmentDist(
+      mx,
+      my,
+      b.x,
+      b.y + b.height,
+      b.x + b.width,
+      b.y + b.height
+    );
+    const left = pointToLineSegmentDist(mx, my, b.x, b.y, b.x, b.y + b.height);
+    const right = pointToLineSegmentDist(
+      mx,
+      my,
+      b.x + b.width,
+      b.y,
+      b.x + b.width,
+      b.y + b.height
+    );
 
     return Math.min(top, bottom, left, right) <= PAD;
   }
@@ -635,23 +682,34 @@ function Canvas({ elements, setElements, boardId, cursors }) {
     socket.emit("update-elements", { boardId, elements: next });
   };
 
-  const getCursor = useCallback((mx, my) => {
-    if (tool === "eraser") return "crosshair";
-    if (tool === "bucket") return "crosshair";
-    if (tool !== "select") return "crosshair";
-    if (selectedId) {
-      const el = elements.find((e) => e.id === selectedId);
-      if (el) {
-        const b = getElementBounds(el);
-        const PAD = 6;
-        const expanded = { x: b.x - PAD, y: b.y - PAD, width: b.width + PAD * 2, height: b.height + PAD * 2 };
-        const hi = hitHandle(expanded, mx, my);
-        if (hi >= 0) return getHandles(expanded)[hi].cursor;
-        if (hitTest(el, mx, my)) return "move";
-      }
+ const getCursor = useCallback((mx, my) => {
+  if (tool === "eraser") return "crosshair";
+  if (tool === "bucket") return "crosshair";
+  if (tool !== "select") return "crosshair";
+
+  if (selectedId) {
+    const el = elements.find((e) => e.id === selectedId);
+    if (el) {
+      const b = getElementBounds(el);
+      const PAD = 6;
+      const expanded = {
+        x: b.x - PAD,
+        y: b.y - PAD,
+        width: b.width + PAD * 2,
+        height: b.height + PAD * 2,
+      };
+
+      const hi = hitHandle(expanded, mx, my);
+      if (hi >= 0) return getHandles(expanded)[hi].cursor;
+
+      // IMPORTANT FIX:
+      // use forceSolid=true so clicking inside hollow shapes still counts
+      if (hitTest(el, mx, my, true)) return "move";
     }
-    return "default";
-  }, [tool, selectedId, elements]);
+  }
+
+  return "default";
+}, [tool, selectedId, elements]);
 
   const getPos = (e) => ({
     x: e.nativeEvent.offsetX,
@@ -694,56 +752,58 @@ function Canvas({ elements, setElements, boardId, cursors }) {
     }
 
     if (tool === "select") {
-      if (selectedId) {
-        const el = elements.find((el) => el.id === selectedId);
-        if (el) {
-          const b = getElementBounds(el);
-          const PAD = 6;
-          const expanded = {
-            x: b.x - PAD,
-            y: b.y - PAD,
-            width: b.width + PAD * 2,
-            height: b.height + PAD * 2,
-          };
-          
-          const hi = hitHandle(expanded, mx, my);
-          if (hi >= 0) {
-            isResizing.current = true;
-            resizeHandle.current = hi;
-            elementSnapshot.current = el;
-            dragStart.current = { x: mx, y: my };
-            return;
-          }
+  if (selectedId) {
+    const el = elements.find((el) => el.id === selectedId);
+    if (el) {
+      const b = getElementBounds(el);
+      const PAD = 6;
+      const expanded = {
+        x: b.x - PAD,
+        y: b.y - PAD,
+        width: b.width + PAD * 2,
+        height: b.height + PAD * 2,
+      };
 
-          // NEW LOGIC: If we click anywhere inside the currently selected element's bounding box, DRAG IT.
-          // This prevents accidental deselecting when clicking the middle of empty shapes!
-          if (mx >= expanded.x && mx <= expanded.x + expanded.width && my >= expanded.y && my <= expanded.y + expanded.height) {
-            isDragging.current = true;
-            dragStart.current = { x: mx, y: my };
-            elementSnapshot.current = el;
-            return;
-          }
-        }
+      const hi = hitHandle(expanded, mx, my);
+      if (hi >= 0) {
+        isResizing.current = true;
+        resizeHandle.current = hi;
+        elementSnapshot.current = el;
+        dragStart.current = { x: mx, y: my };
+        return;
       }
 
-      let hit = null;
-      for (let i = elements.length - 1; i >= 0; i--) {
-        if (hitTest(elements[i], mx, my)) {
-          hit = elements[i];
-          break;
-        }
-      }
-
-      if (hit) {
-        setSelectedId(hit.id);
+      // IMPORTANT FIX:
+      // use forceSolid=true so clicking anywhere inside shape selects/drags it
+      if (hitTest(el, mx, my, true)) {
         isDragging.current = true;
         dragStart.current = { x: mx, y: my };
-        elementSnapshot.current = hit;
-      } else {
-        setSelectedId(null);
+        elementSnapshot.current = el;
+        return;
       }
-      return;
     }
+  }
+
+  let hit = null;
+  for (let i = elements.length - 1; i >= 0; i--) {
+    // IMPORTANT FIX:
+    // use forceSolid=true so hollow shapes are selectable by clicking inside them
+    if (hitTest(elements[i], mx, my, true)) {
+      hit = elements[i];
+      break;
+    }
+  }
+
+  if (hit) {
+    setSelectedId(hit.id);
+    isDragging.current = true;
+    dragStart.current = { x: mx, y: my };
+    elementSnapshot.current = hit;
+  } else {
+    setSelectedId(null);
+  }
+  return;
+}
 
     if (tool === "text") {
       const newId = crypto.randomUUID();

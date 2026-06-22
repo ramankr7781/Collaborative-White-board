@@ -36,9 +36,13 @@ function Register() {
       }
 
     } catch (error) {
-      console.log(error);
+      console.log("REGISTER ERROR:", error);
+      console.log("REGISTER RESPONSE:", error.response?.data);
+
       alert(
         error.response?.data?.message ||
+        error.response?.data?.error ||
+        error.message ||
         "Registration Failed"
       );
     }

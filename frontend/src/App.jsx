@@ -353,7 +353,7 @@ function App() {
     const handleCreateBoard = async () => {
       try {
       const res = await createBoard(
-            "React Test Board"
+            "My Board"
           );
 
         navigate(
