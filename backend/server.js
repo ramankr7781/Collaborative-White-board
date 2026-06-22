@@ -21,8 +21,22 @@ connectDB();
 
 
 
+
+
+const allowedOrigins = [
+  "https://collaborative-white-board-eight.vercel.app",
+  "https://collaborative-white-board-6dl77ams9.vercel.app",
+  "http://localhost:5173"
+];
+
 app.use(cors({
-  origin: process.env.CLIENT_URL,
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
   credentials: true,
 }));
 
