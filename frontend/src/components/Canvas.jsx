@@ -1,79 +1,15 @@
-/**
- * Canvas.jsx — Upgraded Whiteboard Component
- *
- * Changes over original:
- * ─────────────────────────────────────────────────────────────────────────────
- * 1. ARCHITECTURE
- *    - All drawing logic extracted into a single `drawElement(ctx, el, opts)`
- *      helper, eliminating ~300 lines of duplication between redrawCanvas()
- *      and the preview block.
- *    - `getElementBounds(el)` centralises bounding-box maths (used by
- *      selection hit-testing, resize handles, and the selection outline).
- *
- * 2. SELECTION TOOL
- *    - Works for ALL element types (freehand, line, arrow, rectangle, square,
- *      circle, text).
- *    - Click-to-select sets `selectedId`.  Click on empty area deselects.
- *    - A blue dashed selection outline is drawn around every selected element.
- *
- * 3. MOVE / DRAG
- *    - When `tool === "select"` and the mouse goes down on a selected element,
- *      entering drag mode moves the whole element via an `offset` delta.
- *    - All shape types have a dedicated `translateElement()` helper so their
- *      internal coordinate representations stay correct.
- *    - Move is pushed onto the undo stack as a "move" action so Ctrl+Z works.
- *
- * 4. RESIZE
- *    - Eight handles (corners + mid-edges) appear around the bounding box of
- *      any selected element.
- *    - Dragging a handle calls `resizeElement()` which maps the handle index
- *      to the correct coordinate update for every shape type.
- *    - Resize is also undo-able.
- *
- * 5. DELETE
- *    - `Delete` / `Backspace` key removes the selected element and pushes the
- *      removal onto the undo stack so it can be restored with Ctrl+Z.
- *
- * 6. TEXT TOOL — improvements
- *    - Double-clicking an existing text element opens an inline overlay for
- *      live editing (no more plain prompt()).
- *    - Text elements carry `fontSize` (default 24) and `fontFamily`.
- *    - A small floating toolbar appears when a text element is selected,
- *      letting the user change font size and color without re-entering the
- *      tool.
- *
- * 7. EXPORT
- *    - "Export PNG"  → draws canvas to a temporary canvas (without UI chrome)
- *      and triggers a download.
- *    - "Export JSON" → serialises `elements` state to a pretty-printed JSON
- *      file download, which can be imported back later.
- *    - "Import JSON" → file-picker that restores a previously exported JSON.
- *
- * 8. LOCAL PERSISTENCE
- *    - Every time `elements` changes, the board is serialised to
- *      localStorage["whiteboard_elements"].
- *    - On mount, if that key exists the board is restored automatically.
- *    - A "New Board" button clears both state and storage.
- * ─────────────────────────────────────────────────────────────────────────────
- */
-
 import { useEffect, useRef, useState, useCallback } from "react";
 import socket from "../socket";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-const HANDLE_SIZE = 8;   // px, half-width of each resize handle square
+const HANDLE_SIZE = 8;
 const LS_KEY = "whiteboard_elements";
 
-// ─── Pure helpers (no React state) ────────────────────────────────────────────
-
-/**
- * Returns the axis-aligned bounding box for any element.
- * { x, y, width, height }
- */
 function getElementBounds(el) {
   switch (el.type) {
     case "freehand": {
-      if (!el.points || el.points.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
+      if (!el.points || el.points.length === 0) {
+        return { x: 0, y: 0, width: 0, height: 0 };
+      }
       const xs = el.points.map((p) => p.x);
       const ys = el.points.map((p) => p.y);
       const minX = Math.min(...xs), maxX = Math.max(...xs);
@@ -85,7 +21,8 @@ function getElementBounds(el) {
       const minX = Math.min(el.start.x, el.end.x);
       const minY = Math.min(el.start.y, el.end.y);
       return {
-        x: minX, y: minY,
+        x: minX,
+        y: minY,
         width: Math.abs(el.end.x - el.start.x),
         height: Math.abs(el.end.y - el.start.y),
       };
@@ -93,7 +30,12 @@ function getElementBounds(el) {
     case "rectangle": {
       const x = Math.min(el.start.x, el.end.x);
       const y = Math.min(el.start.y, el.end.y);
-      return { x, y, width: Math.abs(el.end.x - el.start.x), height: Math.abs(el.end.y - el.start.y) };
+      return {
+        x,
+        y,
+        width: Math.abs(el.end.x - el.start.x),
+        height: Math.abs(el.end.y - el.start.y),
+      };
     }
     case "square": {
       const dx = el.end.x - el.start.x;
@@ -112,40 +54,186 @@ function getElementBounds(el) {
       };
     case "text": {
       const fontSize = el.fontSize || 24;
-      // Approximate: canvas measureText not available here, use char count heuristic
-      const approxWidth = el.text.length * fontSize * 0.6;
-      return { x: el.x, y: el.y - fontSize, width: approxWidth, height: fontSize * 1.2 };
+      const approxWidth = (el.text?.length || 0) * fontSize * 0.6;
+      return {
+        x: el.x,
+        y: el.y - fontSize,
+        width: approxWidth,
+        height: fontSize * 1.2,
+      };
     }
     default:
       return { x: 0, y: 0, width: 0, height: 0 };
   }
 }
 
-/**
- * Returns true when (mx, my) is inside the element's bounding box
- * (with a small tolerance for thin lines).
- */
-function hitTest(el, mx, my) {
-  const PAD = 8;
-  const b = getElementBounds(el);
-  return (
-    mx >= b.x - PAD && mx <= b.x + b.width + PAD &&
-    my >= b.y - PAD && my <= b.y + b.height + PAD
-  );
+function pointToLineSegmentDist(px, py, x1, y1, x2, y2) {
+  const l2 = (x2 - x1) ** 2 + (y2 - y1) ** 2;
+  if (l2 === 0) return Math.hypot(px - x1, py - y1);
+  let t = ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  const projX = x1 + t * (x2 - x1);
+  const projY = y1 + t * (y2 - y1);
+  return Math.hypot(px - projX, py - projY);
 }
 
-/**
- * Returns the 8 handle rectangles [{ x, y, width, height, cursor }]
- * around the given bounds, in order:
- * 0=TL 1=TM 2=TR 3=MR 4=BR 5=BM 6=BL 7=ML
- */
+function hitTest(el, mx, my, forceSolid = false) {
+  const PAD = (el.size ? el.size / 2 : 5) + 10;
+  const b = getElementBounds(el);
 
+  if (mx < b.x - PAD || mx > b.x + b.width + PAD || my < b.y - PAD || my > b.y + b.height + PAD) {
+    return false;
+  }
 
+  if (el.type === "freehand") {
+    if (el.isFilled || forceSolid) return true; // If filled, click anywhere inside bounds
+    for (let i = 0; i < el.points.length - 1; i++) {
+      if (pointToLineSegmentDist(mx, my, el.points[i].x, el.points[i].y, el.points[i + 1].x, el.points[i + 1].y) <= PAD) return true;
+    }
+    return el.points.length === 1 && Math.hypot(mx - el.points[0].x, my - el.points[0].y) <= PAD;
+  }
 
+  if (el.type === "line" || el.type === "arrow") {
+    return pointToLineSegmentDist(mx, my, el.start.x, el.start.y, el.end.x, el.end.y) <= PAD;
+  }
 
+  if (el.type === "circle") {
+    const distToCenter = Math.hypot(mx - el.center.x, my - el.center.y);
+    if (el.isFilled || forceSolid) return distToCenter <= el.radius + PAD;
+    return Math.abs(distToCenter - el.radius) <= PAD;
+  }
 
+  if (el.type === "rectangle" || el.type === "square") {
+    if (el.isFilled || forceSolid) return true;
 
+    const minX = Math.min(el.start.x, el.end.x);
+    const maxX = Math.max(el.start.x, el.end.x);
+    const minY = Math.min(el.start.y, el.end.y);
+    const maxY = Math.max(el.start.y, el.end.y);
 
+    const top = pointToLineSegmentDist(mx, my, minX, minY, maxX, minY);
+    const bottom = pointToLineSegmentDist(mx, my, minX, maxY, maxX, maxY);
+    const left = pointToLineSegmentDist(mx, my, minX, minY, minX, maxY);
+    const right = pointToLineSegmentDist(mx, my, maxX, minY, maxX, maxY);
+
+    return Math.min(top, bottom, left, right) <= PAD;
+  }
+
+  if (el.type === "text") return true;
+
+  return false;
+}
+
+function shapeToFreehand(el) {
+  const points = [];
+  const STEP = 5;
+
+  const addLine = (x1, y1, x2, y2) => {
+    const steps = Math.max(1, Math.hypot(x2 - x1, y2 - y1) / STEP);
+    for (let i = 0; i <= steps; i++) {
+      points.push({ x: x1 + (x2 - x1) * (i / steps), y: y1 + (y2 - y1) * (i / steps) });
+    }
+  };
+
+  if (el.type === "line" || el.type === "arrow") {
+    addLine(el.start.x, el.start.y, el.end.x, el.end.y);
+    if (el.type === "arrow") {
+      const headLength = 15;
+      const angle = Math.atan2(el.end.y - el.start.y, el.end.x - el.start.x);
+      addLine(el.end.x, el.end.y, el.end.x - headLength * Math.cos(angle - Math.PI / 6), el.end.y - headLength * Math.sin(angle - Math.PI / 6));
+      addLine(el.end.x, el.end.y, el.end.x - headLength * Math.cos(angle + Math.PI / 6), el.end.y - headLength * Math.sin(angle + Math.PI / 6));
+    }
+  } else if (el.type === "rectangle" || el.type === "square") {
+    let x1, y1, x2, y2;
+
+    if (el.type === "square") {
+      const dx = el.end.x - el.start.x;
+      const dy = el.end.y - el.start.y;
+      const side = Math.max(Math.abs(dx), Math.abs(dy));
+      x1 = dx >= 0 ? el.start.x : el.start.x - side;
+      y1 = dy >= 0 ? el.start.y : el.start.y - side;
+      x2 = x1 + side;
+      y2 = y1 + side;
+    } else {
+      x1 = Math.min(el.start.x, el.end.x);
+      y1 = Math.min(el.start.y, el.end.y);
+      x2 = Math.max(el.start.x, el.end.x);
+      y2 = Math.max(el.start.y, el.end.y);
+    }
+
+    addLine(x1, y1, x2, y1);
+    addLine(x2, y1, x2, y2);
+    addLine(x2, y2, x1, y2);
+    addLine(x1, y2, x1, y1);
+
+  } else if (el.type === "circle") {
+    const steps = Math.max(10, (2 * Math.PI * el.radius) / STEP);
+    for (let i = 0; i < steps; i++) {
+      points.push({ x: el.center.x + el.radius * Math.cos((i / steps) * Math.PI * 2), y: el.center.y + el.radius * Math.sin((i / steps) * Math.PI * 2) });
+    }
+  } else {
+    return el;
+  }
+
+  // PRESERVE FILL PROPERTIES WHEN CONVERTING TO FREEHAND!
+  return { 
+    id: el.id, 
+    type: "freehand", 
+    color: el.color, 
+    size: el.size, 
+    points,
+    isFilled: el.isFilled,
+    fillColor: el.fillColor 
+  };
+}
+
+function calculateErase(elements, mx, my, brushSize) {
+  let modified = false;
+  let newElements = [];
+  const eraseRadius = brushSize / 2;
+
+  elements.forEach((el) => {
+    if (el.type === "text") {
+      if (hitTest(el, mx, my)) modified = true;
+      else newElements.push(el);
+      return;
+    }
+
+    let targetEl = el;
+    if (el.type !== "freehand") {
+      if (hitTest(el, mx, my)) targetEl = shapeToFreehand(el);
+      else { newElements.push(el); return; }
+    }
+
+    const PAD = eraseRadius + (targetEl.size ? targetEl.size / 2 : 2);
+    let currentChunk = [], chunks = [], cut = false;
+
+    for (let i = 0; i < targetEl.points.length; i++) {
+      const p = targetEl.points[i];
+      let intersects = Math.hypot(p.x - mx, p.y - my) <= PAD;
+      if (!intersects && i < targetEl.points.length - 1) {
+        if (pointToLineSegmentDist(mx, my, p.x, p.y, targetEl.points[i + 1].x, targetEl.points[i + 1].y) <= PAD) intersects = true;
+      }
+
+      if (intersects) {
+        cut = true;
+        if (currentChunk.length > 0) { chunks.push(currentChunk); currentChunk = []; }
+      } else currentChunk.push(p);
+    }
+    if (currentChunk.length > 0) chunks.push(currentChunk);
+
+    if (cut || el.type !== "freehand") {
+      modified = true;
+      chunks.forEach((chunk) => {
+        if (chunk.length > 1 || (chunk.length === 1 && targetEl.points.length === 1)) {
+          newElements.push({ ...targetEl, id: crypto.randomUUID(), points: chunk });
+        }
+      });
+    } else newElements.push(el);
+  });
+
+  return { newElements, modified };
+}
 
 function getHandles(bounds) {
   const { x, y, width, height } = bounds;
@@ -153,21 +241,18 @@ function getHandles(bounds) {
   const cy = y + height / 2;
   const H = HANDLE_SIZE;
   const positions = [
-    { px: x,          py: y,           cursor: "nwse-resize" },
-    { px: cx,         py: y,           cursor: "ns-resize"   },
-    { px: x + width,  py: y,           cursor: "nesw-resize" },
-    { px: x + width,  py: cy,          cursor: "ew-resize"   },
-    { px: x + width,  py: y + height,  cursor: "nwse-resize" },
-    { px: cx,         py: y + height,  cursor: "ns-resize"   },
-    { px: x,          py: y + height,  cursor: "nesw-resize" },
-    { px: x,          py: cy,          cursor: "ew-resize"   },
+    { px: x, py: y, cursor: "nwse-resize" },
+    { px: cx, py: y, cursor: "ns-resize" },
+    { px: x + width, py: y, cursor: "nesw-resize" },
+    { px: x + width, py: cy, cursor: "ew-resize" },
+    { px: x + width, py: y + height, cursor: "nwse-resize" },
+    { px: cx, py: y + height, cursor: "ns-resize" },
+    { px: x, py: y + height, cursor: "nesw-resize" },
+    { px: x, py: cy, cursor: "ew-resize" },
   ];
   return positions.map((p) => ({ ...p, x: p.px - H, y: p.py - H, size: H * 2 }));
 }
 
-/**
- * Returns handle index (0-7) if (mx,my) is inside a handle, else -1.
- */
 function hitHandle(bounds, mx, my) {
   const handles = getHandles(bounds);
   for (let i = 0; i < handles.length; i++) {
@@ -177,40 +262,51 @@ function hitHandle(bounds, mx, my) {
   return -1;
 }
 
-/**
- * Translates an element by (dx, dy), returning a new element object.
- */
 function translateElement(el, dx, dy) {
   switch (el.type) {
     case "freehand":
-      return { ...el, points: el.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+      return {
+        ...el,
+        points: el.points.map((p) => ({
+          x: p.x + dx,
+          y: p.y + dy,
+        })),
+      };
     case "line":
     case "arrow":
-      return { ...el, start: { x: el.start.x + dx, y: el.start.y + dy }, end: { x: el.end.x + dx, y: el.end.y + dy } };
+      return {
+        ...el,
+        start: { x: el.start.x + dx, y: el.start.y + dy },
+        end: { x: el.end.x + dx, y: el.end.y + dy },
+      };
     case "rectangle":
     case "square":
-      return { ...el, start: { x: el.start.x + dx, y: el.start.y + dy }, end: { x: el.end.x + dx, y: el.end.y + dy } };
+      return {
+        ...el,
+        start: { x: el.start.x + dx, y: el.start.y + dy },
+        end: { x: el.end.x + dx, y: el.end.y + dy },
+      };
     case "circle":
-      return { ...el, center: { x: el.center.x + dx, y: el.center.y + dy } };
+      return {
+        ...el,
+        center: { x: el.center.x + dx, y: el.center.y + dy },
+      };
     case "text":
-      return { ...el, x: el.x + dx, y: el.y + dy };
+      return {
+        ...el,
+        x: el.x + dx,
+        y: el.y + dy,
+      };
     default:
       return el;
   }
 }
 
-/**
- * Resizes an element given a handle index and the new mouse position.
- * handleIndex: 0=TL 1=TM 2=TR 3=MR 4=BR 5=BM 6=BL 7=ML
- */
 function resizeElement(el, handleIndex, mx, my) {
-  // For shapes with start/end, we remap the appropriate corner/edge.
-  // For circles we resize radius. For text we resize fontSize.
   switch (el.type) {
     case "rectangle":
     case "square": {
       let { start, end } = el;
-      // Map handle index to which corner/edge to move
       switch (handleIndex) {
         case 0: start = { x: mx, y: my }; break;
         case 1: start = { ...start, y: my }; break;
@@ -241,14 +337,18 @@ function resizeElement(el, handleIndex, mx, my) {
       return { ...el, fontSize };
     }
     case "freehand": {
-      // Scale all points relative to bounding box
       const b = getElementBounds(el);
       if (b.width === 0 || b.height === 0) return el;
-      let newRight = b.x + b.width, newBottom = b.y + b.height;
+
+      let newRight = b.x + b.width;
+      let newBottom = b.y + b.height;
+
       if (handleIndex === 4 || handleIndex === 3) newRight = mx;
       if (handleIndex === 4 || handleIndex === 5) newBottom = my;
+
       const scaleX = (newRight - b.x) / b.width;
       const scaleY = (newBottom - b.y) / b.height;
+
       return {
         ...el,
         points: el.points.map((p) => ({
@@ -262,9 +362,6 @@ function resizeElement(el, handleIndex, mx, my) {
   }
 }
 
-/**
- * Draws an arrow from start → end on ctx.
- */
 function drawArrow(ctx, start, end, color, size) {
   const headLength = 15;
   const angle = Math.atan2(end.y - start.y, end.x - start.x);
@@ -280,13 +377,9 @@ function drawArrow(ctx, start, end, color, size) {
   ctx.stroke();
 }
 
-/**
- * THE centralised draw function. Draws a single element onto ctx.
- * opts.selected: draw selection outline
- * opts.preview:  true when drawing the live preview shape
- */
 function drawElement(ctx, el, opts = {}) {
   ctx.save();
+
   switch (el.type) {
     case "text": {
       const fontSize = el.fontSize || 24;
@@ -315,6 +408,10 @@ function drawElement(ctx, el, opts = {}) {
       const y = Math.min(el.start.y, el.end.y);
       const w = Math.abs(el.end.x - el.start.x);
       const h = Math.abs(el.end.y - el.start.y);
+      if (el.isFilled) {
+        ctx.fillStyle = el.fillColor || el.color;
+        ctx.fillRect(x, y, w, h);
+      }
       ctx.strokeStyle = el.color;
       ctx.lineWidth = el.size;
       ctx.strokeRect(x, y, w, h);
@@ -326,6 +423,10 @@ function drawElement(ctx, el, opts = {}) {
       const side = Math.max(Math.abs(dx), Math.abs(dy));
       const x = dx >= 0 ? el.start.x : el.start.x - side;
       const y = dy >= 0 ? el.start.y : el.start.y - side;
+      if (el.isFilled) {
+        ctx.fillStyle = el.fillColor || el.color;
+        ctx.fillRect(x, y, side, side);
+      }
       ctx.strokeStyle = el.color;
       ctx.lineWidth = el.size;
       ctx.strokeRect(x, y, side, side);
@@ -333,28 +434,43 @@ function drawElement(ctx, el, opts = {}) {
     }
     case "circle": {
       ctx.beginPath();
+      ctx.arc(el.center.x, el.center.y, el.radius, 0, Math.PI * 2);
+      if (el.isFilled) {
+        ctx.fillStyle = el.fillColor || el.color;
+        ctx.fill();
+      }
       ctx.strokeStyle = el.color;
       ctx.lineWidth = el.size;
-      ctx.arc(el.center.x, el.center.y, el.radius, 0, Math.PI * 2);
       ctx.stroke();
       break;
     }
     case "freehand": {
       const points = el.points;
       if (!points || points.length === 0) break;
-      ctx.strokeStyle = el.tool === "eraser" ? "white" : el.color;
+
+      ctx.strokeStyle = el.color;
       ctx.lineWidth = el.size;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
+
       if (points.length === 1) {
         ctx.beginPath();
         ctx.arc(points[0].x, points[0].y, el.size / 2, 0, Math.PI * 2);
-        ctx.fillStyle = el.tool === "eraser" ? "white" : el.color;
-        ctx.fill();
+        if (el.isFilled) {
+          ctx.fillStyle = el.fillColor || el.color;
+          ctx.fill();
+        }
+        ctx.stroke();
       } else {
         ctx.beginPath();
         ctx.moveTo(points[0].x, points[0].y);
-        for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+        for (let i = 1; i < points.length; i++) {
+          ctx.lineTo(points[i].x, points[i].y);
+        }
+        if (el.isFilled) {
+          ctx.fillStyle = el.fillColor || el.color;
+          ctx.fill();
+        }
         ctx.stroke();
       }
       break;
@@ -363,10 +479,10 @@ function drawElement(ctx, el, opts = {}) {
       break;
   }
 
-  // Selection overlay
   if (opts.selected) {
     const b = getElementBounds(el);
     const PAD = 6;
+
     ctx.save();
     ctx.strokeStyle = "#2563eb";
     ctx.lineWidth = 1.5;
@@ -374,8 +490,13 @@ function drawElement(ctx, el, opts = {}) {
     ctx.strokeRect(b.x - PAD, b.y - PAD, b.width + PAD * 2, b.height + PAD * 2);
     ctx.restore();
 
-    // Draw resize handles
-    const handles = getHandles({ x: b.x - PAD, y: b.y - PAD, width: b.width + PAD * 2, height: b.height + PAD * 2 });
+    const handles = getHandles({
+      x: b.x - PAD,
+      y: b.y - PAD,
+      width: b.width + PAD * 2,
+      height: b.height + PAD * 2,
+    });
+
     handles.forEach((h) => {
       ctx.save();
       ctx.fillStyle = "white";
@@ -391,236 +512,132 @@ function drawElement(ctx, el, opts = {}) {
   ctx.restore();
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
-function Canvas({
-  elements, setElements,boardId,cursors,
-}) {
+function Canvas({ elements, setElements, boardId, cursors }) {
   const canvasRef = useRef(null);
 
-  // Core drawing state
-  const [color, setColor]         = useState("#000000");
+  const [color, setColor] = useState("#000000");
   const [brushSize, setBrushSize] = useState(5);
-  const [tool, setTool]           = useState("pen");
+  const [tool, setTool] = useState("pen");
+  const [isFilled, setIsFilled] = useState(false);
+  const [fillColor, setFillColor] = useState("#ef4444");
 
-  // Elements & undo/redo
-  // Each element in the undo stack is either the element itself (for add)
-  // or { action: "delete"|"move"|"resize", id, before, after? } for mutations.
-    const [redoStack, setRedoStack] = useState([]);
+  const [past, setPast] = useState([]);
+  const [future, setFuture] = useState([]);
 
-  // Selection / interaction
   const [selectedId, setSelectedId] = useState(null);
 
-  // In-progress interaction refs (don't need re-renders)
-  const isDrawing    = useRef(false);
-  const isDragging   = useRef(false);   // moving a selected element
-  const isResizing   = useRef(false);   // resizing via handle
-  const resizeHandle = useRef(-1);      // which handle (0-7)
-  const dragStart    = useRef(null);    // { x, y } mouse position at drag start
-  const elementSnapshot = useRef(null); // element state before drag/resize began
-  const currentStroke   = useRef([]);
-  const startPoint      = useRef(null);
+  const isDrawing = useRef(false);
+  const isDragging = useRef(false);
+  const isResizing = useRef(false);
+  const resizeHandle = useRef(-1);
+  const dragStart = useRef(null);
+  const elementSnapshot = useRef(null);
+  const boardSnapshot = useRef(null);
+  const currentStroke = useRef([]);
+  const startPoint = useRef(null);
 
-  // Preview shape (shown while dragging shape tools)
   const [previewShape, setPreviewShape] = useState(null);
 
-  // Text editing overlay
-  const [editingText, setEditingText]   = useState(null); // { id, x, y, value, fontSize, color }
+  const [editingText, setEditingText] = useState(null);
   const textInputRef = useRef(null);
 
-  // ── Redraw canvas whenever state changes ──────────────────────────────────
-  useEffect(() => { redrawCanvas(); }, [elements, previewShape, selectedId]);
-
-  // ── Initialise canvas ─────────────────────────────────────────────────────
-  useEffect(() => {
+  const redrawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
-    canvas.width  = 1000;
-    canvas.height = 600;
+    if (!canvas) return;
     const ctx = canvas.getContext("2d");
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-  }, []);
 
-  // ── Focus text input when editing ─────────────────────────────────────────
+    elements.forEach((el) => {
+      drawElement(ctx, el, { selected: el.id === selectedId });
+    });
+
+    if (previewShape) {
+      drawElement(ctx, { ...previewShape, color, size: brushSize, isFilled, fillColor });
+    }
+  }, [elements, previewShape, selectedId, brushSize, color, isFilled, fillColor]);
+
+  useEffect(() => {
+    redrawCanvas();
+  }, [redrawCanvas]);
+
+  useEffect(() => {
+    const resizeCanvas = () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      const container = canvas.parentElement;
+      const width = container ? container.clientWidth : window.innerWidth - 40;
+
+      canvas.width = width;
+      canvas.height = Math.max(500, window.innerHeight - 220);
+      redrawCanvas();
+    };
+
+    resizeCanvas();
+    window.addEventListener("resize", resizeCanvas);
+
+    return () => window.removeEventListener("resize", resizeCanvas);
+  }, [redrawCanvas]);
+
   useEffect(() => {
     if (editingText && textInputRef.current) textInputRef.current.focus();
   }, [editingText]);
 
-  // ── Keyboard: Delete selected element ─────────────────────────────────────
   useEffect(() => {
     const handler = (e) => {
       if ((e.key === "Delete" || e.key === "Backspace") && selectedId && !editingText) {
         e.preventDefault();
         const el = elements.find((el) => el.id === selectedId);
         if (!el) return;
-        // Push a "delete" undo record
 
-        const updatedElements =elements.filter(
-            (el) => el.id !== selectedId
-          );
+        setPast((p) => [...p, elements]);
+        setFuture([]);
 
-
-        setRedoStack([]);
+        const updatedElements = elements.filter((el) => el.id !== selectedId);
         setElements(updatedElements);
 
-        socket.emit("delete-element",
-          {
-            boardId,
-            elements: updatedElements,
-          }
-        );
-
-
-        // Store the deleted element so undo can restore it
-        setUndoRecord({ action: "delete", element: el });
+        socket.emit("delete-element", { boardId, elements: updatedElements });
         setSelectedId(null);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [selectedId, elements, editingText]);
+  }, [selectedId, elements, editingText, boardId]);
 
-  // Separate undo record state for delete (so it integrates with existing undo)
-  // We store a richer undo stack alongside the existing elements-based undo.
-  // Strategy: we keep the existing "last element = undo" pattern and extend it
-  // with tagged records.
-  const [undoRecord, setUndoRecord] = useState(null);
-
-  // ── Central undo logic ────────────────────────────────────────────────────
   const undo = () => {
-      setPreviewShape(null);
+    setPreviewShape(null);
+    if (past.length === 0) return;
 
-      if (undoRecord) {
+    const previous = past[past.length - 1];
+    const newPast = past.slice(0, -1);
 
-        // Undo Delete
-        if (undoRecord.action === "delete") {
+    setFuture((f) => [elements, ...f]);
+    setPast(newPast);
+    setElements(previous);
 
-          const updatedElements = [...elements,undoRecord.element,];
-
-          setElements(updatedElements);
-
-          socket.emit("update-elements",
-            {
-              boardId,
-              elements: updatedElements,
-            }
-          );
-
-          setUndoRecord(null);
-          return;
-        }
-
-        // Undo Move / Resize
-        if (undoRecord.action === "move" ||undoRecord.action === "resize") {
-
-          const updatedElements =
-            elements.map((el) =>
-              el.id === undoRecord.id
-                ? undoRecord.before
-                : el
-            );
-
-          setElements(updatedElements);
-
-          socket.emit(
-            "update-elements",
-            {
-              boardId,
-              elements: updatedElements,
-            }
-          );
-
-          setRedoStack((prev) => [
-            ...prev,
-            undoRecord,
-          ]);
-
-          setUndoRecord(null);
-          return;
-        }
-      }
-
-      if (elements.length === 0) return;
-
-      const last =
-        elements[elements.length - 1];
-
-      setRedoStack((prev) => [
-        ...prev,
-        last,
-      ]);
-
-      const updatedElements =
-        elements.slice(0, -1);
-
-      setElements(updatedElements);
-
-      socket.emit(
-        "update-elements",
-        {
-          boardId,
-          elements: updatedElements,
-        }
-      );
+    socket.emit("update-elements", { boardId, elements: previous });
   };
 
   const redo = () => {
-      setPreviewShape(null);
+    setPreviewShape(null);
+    if (future.length === 0) return;
 
-      if (redoStack.length === 0) return;
+    const next = future[0];
+    const newFuture = future.slice(1);
 
-      const last =redoStack[redoStack.length - 1];
+    setPast((p) => [...p, elements]);
+    setFuture(newFuture);
+    setElements(next);
 
-      // Move/Resize Redo
-      if (last &&(last.action === "move" ||last.action === "resize")) {
-
-        const updatedElements =
-          elements.map((el) =>
-            el.id === last.id
-              ? last.after
-              : el
-          );
-
-        setElements(updatedElements);
-
-        socket.emit("update-elements",
-          {
-            boardId,
-            elements: updatedElements,
-          }
-        );
-
-        setRedoStack((prev) =>
-          prev.slice(0, -1)
-        );
-
-        return;
-    }
-
-    // Normal Redo
-      const updatedElements = [
-        ...elements,
-        last,
-      ];
-
-      setElements(updatedElements);
-
-      socket.emit(
-        "update-elements",
-        {
-          boardId,
-          elements: updatedElements,
-        }
-      );
-
-      setRedoStack((prev) =>
-        prev.slice(0, -1)
-      );
+    socket.emit("update-elements", { boardId, elements: next });
   };
 
-
-  // ── Cursor style ──────────────────────────────────────────────────────────
   const getCursor = useCallback((mx, my) => {
+    if (tool === "eraser") return "crosshair";
+    if (tool === "bucket") return "crosshair";
     if (tool !== "select") return "crosshair";
     if (selectedId) {
       const el = elements.find((e) => e.id === selectedId);
@@ -636,46 +653,59 @@ function Canvas({
     return "default";
   }, [tool, selectedId, elements]);
 
-
-  // ── Redraw ────────────────────────────────────────────────────────────────
-  const redrawCanvas = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "white";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    elements.forEach((el) => {
-      drawElement(ctx, el, { selected: el.id === selectedId });
-    });
-
-    if (previewShape) {
-      drawElement(ctx, { ...previewShape, color, size: brushSize });
-    }
-  };
-
-
-  // ── Mouse event helpers ───────────────────────────────────────────────────
   const getPos = (e) => ({
     x: e.nativeEvent.offsetX,
     y: e.nativeEvent.offsetY,
   });
 
-
-  // ── startDrawing ──────────────────────────────────────────────────────────
   const startDrawing = (e) => {
     const { x: mx, y: my } = getPos(e);
 
-    // ── SELECT TOOL ──
+    boardSnapshot.current = JSON.stringify(elements);
+
+    if (tool === "bucket") {
+      let hit = null;
+      for (let i = elements.length - 1; i >= 0; i--) {
+        // Pass forceSolid=true so we can click the transparent middle of empty shapes!
+        if (hitTest(elements[i], mx, my, true)) {
+          hit = elements[i];
+          break;
+        }
+      }
+      
+      // We now allow bucket to fill freehand shapes too
+      if (hit && ["rectangle", "square", "circle", "freehand"].includes(hit.type)) {
+        setPast((p) => [...p, elements]);
+        setFuture([]);
+        const updated = elements.map(el => 
+          el.id === hit.id ? { ...el, isFilled: true, fillColor: fillColor } : el
+        );
+        setElements(updated);
+        socket.emit("update-elements", { boardId, elements: updated });
+      }
+      return;
+    }
+
+    if (tool === "eraser") {
+      isDrawing.current = true;
+      const { newElements, modified } = calculateErase(elements, mx, my, brushSize);
+      if (modified) setElements(newElements);
+      return;
+    }
+
     if (tool === "select") {
-      // Check if we're clicking a resize handle on the currently selected element
       if (selectedId) {
         const el = elements.find((el) => el.id === selectedId);
         if (el) {
           const b = getElementBounds(el);
           const PAD = 6;
-          const expanded = { x: b.x - PAD, y: b.y - PAD, width: b.width + PAD * 2, height: b.height + PAD * 2 };
+          const expanded = {
+            x: b.x - PAD,
+            y: b.y - PAD,
+            width: b.width + PAD * 2,
+            height: b.height + PAD * 2,
+          };
+          
           const hi = hitHandle(expanded, mx, my);
           if (hi >= 0) {
             isResizing.current = true;
@@ -684,19 +714,28 @@ function Canvas({
             dragStart.current = { x: mx, y: my };
             return;
           }
+
+          // NEW LOGIC: If we click anywhere inside the currently selected element's bounding box, DRAG IT.
+          // This prevents accidental deselecting when clicking the middle of empty shapes!
+          if (mx >= expanded.x && mx <= expanded.x + expanded.width && my >= expanded.y && my <= expanded.y + expanded.height) {
+            isDragging.current = true;
+            dragStart.current = { x: mx, y: my };
+            elementSnapshot.current = el;
+            return;
+          }
         }
       }
 
-      // Click to select / deselect
       let hit = null;
-      // Iterate in reverse so top-most element wins
       for (let i = elements.length - 1; i >= 0; i--) {
-        if (hitTest(elements[i], mx, my)) { hit = elements[i]; break; }
+        if (hitTest(elements[i], mx, my)) {
+          hit = elements[i];
+          break;
+        }
       }
 
       if (hit) {
         setSelectedId(hit.id);
-        // Start drag-move
         isDragging.current = true;
         dragStart.current = { x: mx, y: my };
         elementSnapshot.current = hit;
@@ -706,65 +745,90 @@ function Canvas({
       return;
     }
 
-    // ── TEXT TOOL ── (new element via click, edit existing via double-click handled separately)
     if (tool === "text") {
       const newId = crypto.randomUUID();
       const textEl = {
         id: newId,
         type: "text",
-        x: mx, y: my,
+        x: mx,
+        y: my,
         text: "",
         color,
         fontSize: 24,
         fontFamily: "Arial",
       };
-      setEditingText({ id: newId, x: mx, y: my, value: "", fontSize: 24, color, isNew: true, element: textEl });
+      setEditingText({
+        id: newId,
+        x: mx,
+        y: my,
+        value: "",
+        fontSize: 24,
+        color,
+        isNew: true,
+        element: textEl,
+      });
       return;
     }
 
-    // ── SHAPE / PEN / ERASER tools ──
     startPoint.current = { x: mx, y: my };
     currentStroke.current = [{ x: mx, y: my }];
     isDrawing.current = true;
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
-    ctx.strokeStyle = tool === "eraser" ? "white" : color;
+
     ctx.lineWidth = brushSize;
     ctx.lineCap = "round";
+    ctx.lineJoin = "round";
     ctx.beginPath();
     ctx.moveTo(mx, my);
+    ctx.strokeStyle = color;
   };
 
-
-  // ── draw (mousemove) ──────────────────────────────────────────────────────
   const draw = (e) => {
     const { x: mx, y: my } = getPos(e);
 
-    socket.emit("cursor-move",
-      {
-        boardId,
-        x: mx,
-        y: my,
-      }
-    );
+    socket.emit("cursor-move", {
+      boardId,
+      x: mx,
+      y: my,
+      name: localStorage.getItem("name") || "User",
+    });
 
-    // Update cursor
     canvasRef.current.style.cursor = getCursor(mx, my);
 
-    // ── DRAG MOVE ──
+    if (tool === "bucket") return;
+
+    if (tool === "eraser") {
+      if (isDrawing.current) {
+        setElements((prev) => {
+          const { newElements, modified } = calculateErase(prev, mx, my, brushSize);
+          return modified ? newElements : prev;
+        });
+      }
+      return;
+    }
+
     if (isDragging.current && dragStart.current && elementSnapshot.current) {
       const dx = mx - dragStart.current.x;
       const dy = my - dragStart.current.y;
       const updated = translateElement(elementSnapshot.current, dx, dy);
-      setElements((prev) => prev.map((el) => (el.id === updated.id ? updated : el)));
+      setElements((prev) =>
+        prev.map((el) => (el.id === updated.id ? updated : el))
+      );
       return;
     }
 
-    // ── RESIZE ──
     if (isResizing.current && elementSnapshot.current) {
-      const updated = resizeElement(elementSnapshot.current, resizeHandle.current, mx, my);
-      setElements((prev) => prev.map((el) => (el.id === updated.id ? updated : el)));
+      const updated = resizeElement(
+        elementSnapshot.current,
+        resizeHandle.current,
+        mx,
+        my
+      );
+      setElements((prev) =>
+        prev.map((el) => (el.id === updated.id ? updated : el))
+      );
       return;
     }
 
@@ -775,66 +839,72 @@ function Canvas({
       if (tool === "circle") {
         const dx = mx - startPoint.current.x;
         const dy = my - startPoint.current.y;
-        setPreviewShape({ type: "circle", center: startPoint.current, radius: Math.sqrt(dx * dx + dy * dy) });
+        setPreviewShape({
+          type: "circle",
+          center: startPoint.current,
+          radius: Math.sqrt(dx * dx + dy * dy),
+        });
       } else {
-        setPreviewShape({ type: tool, start: startPoint.current, end: { x: mx, y: my } });
+        setPreviewShape({
+          type: tool,
+          start: startPoint.current,
+          end: { x: mx, y: my },
+        });
       }
       return;
     }
 
-    // Freehand / eraser
     currentStroke.current.push({ x: mx, y: my });
+
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = brushSize;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
     ctx.lineTo(mx, my);
     ctx.stroke();
   };
 
-  // ── stopDrawing ───────────────────────────────────────────────────────────
   const stopDrawing = (e) => {
     const { x: mx, y: my } = getPos(e);
 
-    // ── END DRAG MOVE ──
-    if (isDragging.current) {
-      isDragging.current = false;
-      if (elementSnapshot.current) {
-        const dx = mx - dragStart.current.x;
-        const dy = my - dragStart.current.y;
-        if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
-          const after = elements.find((el) => el.id === elementSnapshot.current.id);
-          setUndoRecord({ action: "move", id: elementSnapshot.current.id, before: elementSnapshot.current, after });
-          setRedoStack([]);
+    if (tool === "bucket") return;
 
-          socket.emit("move-element", {
-            boardId,
-            elements,
-          });
-
-        }
+    if (tool === "eraser") {
+      isDrawing.current = false;
+      if (boardSnapshot.current && JSON.stringify(elements) !== boardSnapshot.current) {
+        setPast((p) => [...p, JSON.parse(boardSnapshot.current)]);
+        setFuture([]);
+        socket.emit("update-elements", { boardId, elements });
       }
-
-      
-
-      elementSnapshot.current = null;
-      dragStart.current = null;
+      boardSnapshot.current = null;
       return;
     }
 
-    // ── END RESIZE ──
-    if (isResizing.current) {
-      isResizing.current = false;
-      if (elementSnapshot.current) {
-        const after = elements.find((el) => el.id === elementSnapshot.current.id);
-        setUndoRecord({ action: "resize", id: elementSnapshot.current.id, before: elementSnapshot.current, after });
-        setRedoStack([]);
-
-        socket.emit("resize-element", {
-          boardId,
-          elements,
-        });
-
+    if (isDragging.current) {
+      isDragging.current = false;
+      if (boardSnapshot.current && JSON.stringify(elements) !== boardSnapshot.current) {
+        setPast((p) => [...p, JSON.parse(boardSnapshot.current)]);
+        setFuture([]);
+        socket.emit("move-element", { boardId, elements });
       }
       elementSnapshot.current = null;
+      dragStart.current = null;
+      boardSnapshot.current = null;
+      return;
+    }
+
+    if (isResizing.current) {
+      isResizing.current = false;
+      if (boardSnapshot.current && JSON.stringify(elements) !== boardSnapshot.current) {
+        setPast((p) => [...p, JSON.parse(boardSnapshot.current)]);
+        setFuture([]);
+        socket.emit("resize-element", { boardId, elements });
+      }
+      elementSnapshot.current = null;
+      boardSnapshot.current = null;
       return;
     }
 
@@ -844,8 +914,17 @@ function Canvas({
     const shapeTools = { line: true, arrow: true, rectangle: true, square: true, circle: true };
 
     if (shapeTools[tool]) {
+      setPast((p) => [...p, elements]);
+      setFuture([]);
+
       let el;
       const base = { id: crypto.randomUUID(), color, size: brushSize };
+
+      if (["rectangle", "square", "circle"].includes(tool)) {
+        base.isFilled = isFilled;
+        base.fillColor = fillColor;
+      }
+
       if (tool === "circle") {
         const dx = mx - startPoint.current.x;
         const dy = my - startPoint.current.y;
@@ -853,34 +932,38 @@ function Canvas({
       } else {
         el = { ...base, type: tool, start: startPoint.current, end: { x: mx, y: my } };
       }
-      setRedoStack([]);
-      setElements((prev) => [...prev, el]);
 
-      socket.emit("drawing", {
-        boardId,
-        element: el,
-      });
+      const updated = [...elements, el];
+      setElements(updated);
+      socket.emit("drawing", { boardId, element: el });
 
       setPreviewShape(null);
+      currentStroke.current = [];
+      boardSnapshot.current = null;
       return;
     }
 
-    // Freehand / eraser
     if (currentStroke.current.length === 0) return;
-    const stroke = { id: crypto.randomUUID(), type: "freehand", color, size: brushSize, tool, points: [...currentStroke.current] };
-    setRedoStack([]);
-    setElements((prev) => [...prev, stroke]);
 
-    socket.emit("drawing", {
-      boardId,
-      element: stroke,
-    });
+    setPast((p) => [...p, elements]);
+    setFuture([]);
 
+    const stroke = {
+      id: crypto.randomUUID(),
+      type: "freehand",
+      color,
+      size: brushSize,
+      points: [...currentStroke.current],
+    };
+
+    const updated = [...elements, stroke];
+    setElements(updated);
+    socket.emit("drawing", { boardId, element: stroke });
 
     currentStroke.current = [];
+    boardSnapshot.current = null;
   };
 
-  // ── Double-click: edit existing text ─────────────────────────────────────
   const handleDoubleClick = (e) => {
     if (tool !== "select" && tool !== "text") return;
     const { x: mx, y: my } = getPos(e);
@@ -893,66 +976,48 @@ function Canvas({
     }
   };
 
-  // ── Commit text edit ──────────────────────────────────────────────────────
   const commitText = () => {
     if (!editingText) return;
     const { id, x, y, value, fontSize, color: tColor, isNew, element } = editingText;
     if (value.trim() === "") {
-      // If new, discard. If editing existing, delete.
-      if (!isNew) setElements((prev) => prev.filter((el) => el.id !== id));
+      if (!isNew) {
+        setPast((p) => [...p, elements]);
+        setFuture([]);
+        const updated = elements.filter((el) => el.id !== id);
+        setElements(updated);
+        socket.emit("delete-element", { boardId, elements: updated });
+      }
     } else if (isNew) {
       const newEl = { ...element, text: value, fontSize, color: tColor };
-      setRedoStack([]);
-      setElements((prev) => [...prev, newEl]);
-
-      socket.emit("drawing",{
-          boardId,
-          element: newEl,
-        }
-      );
+      setPast((p) => [...p, elements]);
+      setFuture([]);
+      const updated = [...elements, newEl];
+      setElements(updated);
+      socket.emit("drawing", { boardId, element: newEl });
 
     } else {
-        const updatedElements =elements.map((el) =>
-            el.id === id
-              ? {
-                  ...el,
-                  text: value,
-                  fontSize,
-                  color: tColor
-                }
-              : el
-          );
-
-        setElements(updatedElements);
-
-        socket.emit(
-          "update-elements",
-          {
-            boardId,
-            elements: updatedElements,
-          }
-        );
+      setPast((p) => [...p, elements]);
+      setFuture([]);
+      const updatedElements = elements.map((el) =>
+        el.id === id ? { ...el, text: value, fontSize, color: tColor } : el
+      );
+      setElements(updatedElements);
+      socket.emit("update-elements", { boardId, elements: updatedElements });
     }
     setEditingText(null);
   };
 
-  // ── Clear board ───────────────────────────────────────────────────────────
   const clearCanvas = () => {
+    setPast((p) => [...p, elements]);
+    setFuture([]);
     setElements([]);
 
-    socket.emit(
-      "clear-board",
-      boardId
-    );
-
-    setRedoStack([]);
+    socket.emit("clear-board", boardId);
     setPreviewShape(null);
     setSelectedId(null);
-    setUndoRecord(null);
-    try { localStorage.removeItem(LS_KEY); } catch {}
+    try { localStorage.removeItem(LS_KEY); } catch { }
   };
 
-  // ── Export PNG ────────────────────────────────────────────────────────────
   const exportPNG = () => {
     const canvas = canvasRef.current;
     const url = canvas.toDataURL("image/png");
@@ -962,7 +1027,6 @@ function Canvas({
     a.click();
   };
 
-  // ── Export JSON ───────────────────────────────────────────────────────────
   const exportJSON = () => {
     const json = JSON.stringify(elements, null, 2);
     const blob = new Blob([json], { type: "application/json" });
@@ -974,7 +1038,6 @@ function Canvas({
     URL.revokeObjectURL(url);
   };
 
-  // ── Import JSON ───────────────────────────────────────────────────────────
   const importJSON = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -983,8 +1046,9 @@ function Canvas({
       try {
         const data = JSON.parse(ev.target.result);
         if (Array.isArray(data)) {
+          setPast((p) => [...p, elements]);
+          setFuture([]);
           setElements(data);
-          setRedoStack([]);
           setSelectedId(null);
         }
       } catch { alert("Invalid JSON file"); }
@@ -993,7 +1057,6 @@ function Canvas({
     e.target.value = "";
   };
 
-  // ── Toolbar button style helper ───────────────────────────────────────────
   const btnStyle = (active) => ({
     padding: "5px 10px",
     borderRadius: 4,
@@ -1005,104 +1068,305 @@ function Canvas({
     fontWeight: active ? 600 : 400,
   });
 
-  const tools = ["pen","eraser","text","line","arrow","rectangle","square","circle","select"];
-
-  console.log(cursors);
+  const tools = ["pen", "eraser", "bucket", "text", "line", "arrow", "rectangle", "square", "circle", "select"];
 
   return (
-    <div style={{ userSelect: "none", fontFamily: "system-ui, sans-serif" }}>
-      {/* ── Toolbar ── */}
-      <div style={{
-        display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center",
-        padding: "8px 10px", background: "#f8f9fa", borderBottom: "1px solid #ddd", marginBottom: 8,
-      }}>
-        {/* Undo / Redo */}
-        <button style={btnStyle(false)} onClick={undo} disabled={elements.length === 0 && !undoRecord}>↩ Undo</button>
-        <button style={btnStyle(false)} onClick={redo} disabled={redoStack.length === 0}>↪ Redo</button>
-
-        <span style={{ width: 1, height: 24, background: "#ddd", margin: "0 4px" }} />
-
-        {/* Tool buttons */}
-        {tools.map((t) => (
-          <button key={t} style={btnStyle(tool === t)} onClick={() => { setTool(t); setSelectedId(null); }}>
-            {{ pen:"✏️ Pen", eraser:"⬜ Eraser", text:"T Text", line:"/ Line",
-               arrow:"→ Arrow", rectangle:"▭ Rect", square:"□ Square",
-               circle:"○ Circle", select:"⬚ Select" }[t]}
+    <div style={{ userSelect: "none", fontFamily: "system-ui, sans-serif", width: "100%" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: 12,
+          padding: "10px 12px",
+          background: "#f8f9fa",
+          borderBottom: "1px solid #ddd",
+          marginBottom: 8,
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            flexWrap: "wrap",
+          }}
+        >
+          <button style={btnStyle(false)} onClick={undo} disabled={past.length === 0}>
+            ↩ Undo
           </button>
-        ))}
 
-        <span style={{ width: 1, height: 24, background: "#ddd", margin: "0 4px" }} />
+          <button style={btnStyle(false)} onClick={redo} disabled={future.length === 0}>
+            ↪ Redo
+          </button>
 
-        {/* Brush size */}
-        <span style={{ fontSize: 12 }}>Size: {brushSize}</span>
-        <input type="range" min="1" max="20" value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} style={{ width: 80 }} />
+          <span style={{ width: 1, height: 24, background: "#ddd", margin: "0 4px" }} />
 
-        {/* Color */}
-        <span style={{ fontSize: 12 }}>Color:</span>
-        <input type="color" value={color} onChange={(e) => setColor(e.target.value)} style={{ width: 32, height: 28, padding: 0, border: "1px solid #ccc", borderRadius: 4 }} />
+          {tools.map((t) => (
+            <button
+              key={t}
+              style={btnStyle(tool === t)}
+              onClick={() => {
+                setTool(t);
+                setSelectedId(null);
+              }}
+            >
+              {{
+                pen: "✏️ Pen",
+                eraser: "⬜ Eraser",
+                bucket: "🪣 Bucket",
+                text: "T Text",
+                line: "/ Line",
+                arrow: "→ Arrow",
+                rectangle: "▭ Rect",
+                square: "□ Square",
+                circle: "○ Circle",
+                select: "⬚ Select",
+              }[t]}
+            </button>
+          ))}
+        </div>
 
-        <span style={{ width: 1, height: 24, background: "#ddd", margin: "0 4px" }} />
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            flexWrap: "wrap",
+            justifyContent: "center",
+          }}
+        >
+          <span style={{ fontSize: 12, fontWeight: 500 }}>Size: {brushSize}</span>
+          <input
+            type="range"
+            min="1"
+            max="20"
+            value={brushSize}
+            onChange={(e) => setBrushSize(Number(e.target.value))}
+            style={{ width: 100 }}
+          />
 
-        {/* Clear */}
-        <button style={{ ...btnStyle(false), color: "#dc2626" }} onClick={clearCanvas}>🗑 Clear</button>
+          <span style={{ fontSize: 12, fontWeight: 500 }}>Stroke:</span>
+          <input
+            type="color"
+            value={color}
+            onChange={(e) => setColor(e.target.value)}
+            style={{
+              width: 34,
+              height: 28,
+              padding: 0,
+              border: "1px solid #ccc",
+              borderRadius: 4,
+              cursor: "pointer",
+            }}
+          />
 
-        {/* Export */}
-        <button style={btnStyle(false)} onClick={exportPNG}>⬇ PNG</button>
-        <button style={btnStyle(false)} onClick={exportJSON}>⬇ JSON</button>
-        <label style={{ ...btnStyle(false), display: "inline-block", lineHeight: "normal" }}>
-          ⬆ Import
-          <input type="file" accept=".json" onChange={importJSON} style={{ display: "none" }} />
-        </label>
+          <span style={{ width: 1, height: 24, background: "#ddd", margin: "0 4px" }} />
+
+          <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 500, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={isFilled}
+              onChange={(e) => setIsFilled(e.target.checked)}
+              style={{ cursor: "pointer" }}
+            />
+            Fill:
+          </label>
+          <input
+            type="color"
+            value={fillColor}
+            onChange={(e) => setFillColor(e.target.value)}
+            disabled={!isFilled}
+            style={{
+              width: 34,
+              height: 28,
+              padding: 0,
+              border: "1px solid #ccc",
+              borderRadius: 4,
+              cursor: isFilled ? "pointer" : "not-allowed",
+              opacity: isFilled ? 1 : 0.4,
+            }}
+          />
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            flexWrap: "wrap",
+            justifyContent: "flex-end",
+          }}
+        >
+          <button style={{ ...btnStyle(false), color: "#dc2626" }} onClick={clearCanvas}>
+            🗑 Clear
+          </button>
+
+          <button style={btnStyle(false)} onClick={exportPNG}>
+            ⬇ PNG
+          </button>
+
+          <button style={btnStyle(false)} onClick={exportJSON}>
+            ⬇ JSON
+          </button>
+
+          <label
+            style={{
+              ...btnStyle(false),
+              display: "inline-flex",
+              alignItems: "center",
+              lineHeight: "normal",
+              cursor: "pointer",
+            }}
+          >
+            ⬆ Import
+            <input
+              type="file"
+              accept=".json"
+              onChange={importJSON}
+              style={{ display: "none" }}
+            />
+          </label>
+        </div>
       </div>
 
-      {/* ── Text selected element toolbar ── */}
-      {selectedId && (() => {
-        const sel = elements.find((el) => el.id === selectedId);
-        if (!sel || sel.type !== "text") return null;
-        return (
-          <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 10px", background: "#eff6ff", borderBottom: "1px solid #bfdbfe", marginBottom: 4 }}>
-            <span style={{ fontSize: 12, fontWeight: 600 }}>Text options:</span>
-            <span style={{ fontSize: 12 }}>Size:</span>
-            <input type="number" min="8" max="96" value={sel.fontSize || 24}
-              onChange={(e) => setElements((prev) => prev.map((el) => el.id === sel.id ? { ...el, fontSize: Number(e.target.value) } : el))}
-              style={{ width: 52, fontSize: 12, padding: "2px 4px" }} />
-            <span style={{ fontSize: 12 }}>Color:</span>
-            <input type="color" value={sel.color}
-              onChange={(e) => setElements((prev) => prev.map((el) => el.id === sel.id ? { ...el, color: e.target.value } : el))}
-              style={{ width: 28, height: 22, padding: 0 }} />
-            <button style={{ ...btnStyle(false), fontSize: 12, color: "#dc2626" }}
-              onClick={() => {
+      {selectedId &&
+        (() => {
+          const sel = elements.find((el) => el.id === selectedId);
+          if (!sel) return null;
 
-                  const updatedElements =
-                    elements.filter(
-                      (el) =>
-                        el.id !== sel.id
-                    );
+          if (sel.type === "text") {
+            return (
+              <div
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  padding: "4px 10px",
+                  background: "#eff6ff",
+                  borderBottom: "1px solid #bfdbfe",
+                  marginBottom: 4,
+                  flexWrap: "wrap",
+                }}
+              >
+                <span style={{ fontSize: 12, fontWeight: 600 }}>Text options:</span>
+                <span style={{ fontSize: 12 }}>Size:</span>
+                <input
+                  type="number"
+                  min="8"
+                  max="96"
+                  value={sel.fontSize || 24}
+                  onChange={(e) => {
+                    setPast((p) => [...p, elements]);
+                    setFuture([]);
+                    const updated = elements.map((el) =>
+                        el.id === sel.id ? { ...el, fontSize: Number(e.target.value) } : el
+                      );
+                    setElements(updated);
+                    socket.emit("update-elements", { boardId, elements: updated });
+                  }}
+                  style={{ width: 52, fontSize: 12, padding: "2px 4px" }}
+                />
+                <span style={{ fontSize: 12 }}>Color:</span>
+                <input
+                  type="color"
+                  value={sel.color}
+                  onChange={(e) => {
+                    setPast((p) => [...p, elements]);
+                    setFuture([]);
+                    const updated = elements.map((el) =>
+                        el.id === sel.id ? { ...el, color: e.target.value } : el
+                      );
+                    setElements(updated);
+                    socket.emit("update-elements", { boardId, elements: updated });
+                  }}
+                  style={{ width: 28, height: 22, padding: 0 }}
+                />
+                <button
+                  style={{ ...btnStyle(false), fontSize: 12, color: "#dc2626" }}
+                  onClick={() => {
+                    setPast((p) => [...p, elements]);
+                    setFuture([]);
+                    const updatedElements = elements.filter((el) => el.id !== sel.id);
+                    setElements(updatedElements);
+                    socket.emit("delete-element", { boardId, elements: updatedElements });
+                    setSelectedId(null);
+                  }}
+                >
+                  Delete
+                </button>
+              </div>
+            );
+          } else {
+            return (
+              <div
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  padding: "4px 10px",
+                  background: "#eff6ff",
+                  borderBottom: "1px solid #bfdbfe",
+                  marginBottom: 4,
+                  flexWrap: "wrap",
+                }}
+              >
+                <span style={{ fontSize: 12, fontWeight: 600 }}>Shape options:</span>
 
-                  setElements(updatedElements);
+                <span style={{ fontSize: 12 }}>Size:</span>
+                <input type="number" min="1" max="20" value={sel.size} onChange={(e) => {
+                  setPast((p) => [...p, elements]); setFuture([]);
+                  const val = Number(e.target.value);
+                  const updated = elements.map(el => el.id === sel.id ? { ...el, size: val } : el);
+                  setElements(updated); socket.emit("update-elements", { boardId, elements: updated });
+                }} style={{ width: 44, fontSize: 12, padding: "2px 4px" }} />
 
-                  socket.emit(
-                    "delete-element",
-                    {
-                      boardId,
-                      elements: updatedElements,
-                    }
-                  );
+                <span style={{ fontSize: 12 }}>Stroke:</span>
+                <input type="color" value={sel.color} onChange={(e) => {
+                  setPast((p) => [...p, elements]); setFuture([]);
+                  const updated = elements.map(el => el.id === sel.id ? { ...el, color: e.target.value } : el);
+                  setElements(updated); socket.emit("update-elements", { boardId, elements: updated });
+                }} style={{ width: 28, height: 22, padding: 0 }} />
 
+                {/* Now supports filling sliced freehand shapes too! */}
+                {["rectangle", "square", "circle", "freehand"].includes(sel.type) && (
+                  <>
+                    <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, marginLeft: 8 }}>
+                      <input type="checkbox" checked={!!sel.isFilled} onChange={(e) => {
+                        setPast((p) => [...p, elements]); setFuture([]);
+                        const updated = elements.map(el => el.id === sel.id ? { ...el, isFilled: e.target.checked, fillColor: el.fillColor || color } : el);
+                        setElements(updated); socket.emit("update-elements", { boardId, elements: updated });
+                      }} /> Fill
+                    </label>
+                    <input type="color" value={sel.fillColor || color} disabled={!sel.isFilled} onChange={(e) => {
+                      setPast((p) => [...p, elements]); setFuture([]);
+                      const updated = elements.map(el => el.id === sel.id ? { ...el, fillColor: e.target.value } : el);
+                      setElements(updated); socket.emit("update-elements", { boardId, elements: updated });
+                    }} style={{ width: 28, height: 22, padding: 0, opacity: sel.isFilled ? 1 : 0.4 }} />
+                  </>
+                )}
+
+                <div style={{ flexGrow: 1 }} />
+                <button style={{ ...btnStyle(false), fontSize: 12, color: "#dc2626" }} onClick={() => {
+                  setPast((p) => [...p, elements]); setFuture([]);
+                  const updated = elements.filter(el => el.id !== sel.id);
+                  setElements(updated); socket.emit("delete-element", { boardId, elements: updated });
                   setSelectedId(null);
-                }}>
+                }}>Delete</button>
+              </div>
+            );
+          }
+        })()}
 
-              Delete
-            </button>
-          </div>
-        );
-      })()}
-
-      {/* ── Canvas wrapper (relative for text overlay) ── */}
-      <div style={{ position: "relative", display: "inline-block" }}>
+      <div style={{ position: "relative", width: "100%" }}>
         <canvas
           ref={canvasRef}
-          style={{ border: "2px solid #d1d5db", display: "block" }}
+          style={{
+            border: "2px solid #d1d5db",
+            display: "block",
+            width: "100%",
+          }}
           onMouseDown={startDrawing}
           onMouseMove={draw}
           onMouseUp={stopDrawing}
@@ -1110,96 +1374,157 @@ function Canvas({
           onDoubleClick={handleDoubleClick}
         />
 
-        {/* ── Inline text editor overlay ── */}
         {editingText && (
-          <div style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
-            <div style={{
+          <div
+            style={{
               position: "absolute",
-              top: editingText.y - (editingText.fontSize || 24) - 4,
-              left: editingText.x - 2,
-              pointerEvents: "all",
-              background: "rgba(255,255,255,0.9)",
-              border: "1.5px dashed #2563eb",
-              borderRadius: 3,
-              padding: 4,
-              display: "flex", flexDirection: "column", gap: 4,
-              boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
-            }}>
+              top: 0,
+              left: 0,
+              width: "100%",
+              height: "100%",
+              pointerEvents: "none",
+            }}
+          >
+            <div
+              style={{
+                position: "absolute",
+                top: editingText.y - (editingText.fontSize || 24) - 4,
+                left: editingText.x - 2,
+                pointerEvents: "all",
+                background: "rgba(255,255,255,0.9)",
+                border: "1.5px dashed #2563eb",
+                borderRadius: 3,
+                padding: 4,
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+                boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
+              }}
+            >
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <label style={{ fontSize: 11 }}>Size:
-                  <input type="number" min="8" max="96" value={editingText.fontSize}
-                    onChange={(e) => setEditingText((p) => ({ ...p, fontSize: Number(e.target.value) }))}
-                    style={{ width: 44, marginLeft: 4, fontSize: 11 }} />
+                <label style={{ fontSize: 11 }}>
+                  Size:
+                  <input
+                    type="number"
+                    min="8"
+                    max="96"
+                    value={editingText.fontSize}
+                    onChange={(e) =>
+                      setEditingText((p) => ({
+                        ...p,
+                        fontSize: Number(e.target.value),
+                      }))
+                    }
+                    style={{ width: 44, marginLeft: 4, fontSize: 11 }}
+                  />
                 </label>
-                <input type="color" value={editingText.color}
-                  onChange={(e) => setEditingText((p) => ({ ...p, color: e.target.value }))}
-                  style={{ width: 24, height: 20, padding: 0 }} />
+
+                <input
+                  type="color"
+                  value={editingText.color}
+                  onChange={(e) =>
+                    setEditingText((p) => ({
+                      ...p,
+                      color: e.target.value,
+                    }))
+                  }
+                  style={{ width: 24, height: 20, padding: 0 }}
+                />
               </div>
+
               <textarea
                 ref={textInputRef}
                 value={editingText.value}
                 rows={2}
-                onChange={(e) => setEditingText((p) => ({ ...p, value: e.target.value }))}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitText(); } if (e.key === "Escape") setEditingText(null); }}
+                onChange={(e) =>
+                  setEditingText((p) => ({
+                    ...p,
+                    value: e.target.value,
+                  }))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    commitText();
+                  }
+                  if (e.key === "Escape") setEditingText(null);
+                }}
                 style={{
                   fontSize: editingText.fontSize,
                   color: editingText.color,
                   fontFamily: "Arial",
-                  border: "none", outline: "none", background: "transparent",
-                  resize: "none", minWidth: 120,
+                  border: "none",
+                  outline: "none",
+                  background: "transparent",
+                  resize: "none",
+                  minWidth: 120,
                 }}
               />
+
               <div style={{ display: "flex", gap: 4 }}>
-                <button onClick={commitText} style={{ ...btnStyle(true), fontSize: 11, padding: "2px 8px" }}>Save</button>
-                <button onClick={() => setEditingText(null)} style={{ ...btnStyle(false), fontSize: 11, padding: "2px 8px" }}>Cancel</button>
+                <button
+                  onClick={commitText}
+                  style={{ ...btnStyle(true), fontSize: 11, padding: "2px 8px" }}
+                >
+                  Save
+                </button>
+
+                <button
+                  onClick={() => setEditingText(null)}
+                  style={{ ...btnStyle(false), fontSize: 11, padding: "2px 8px" }}
+                >
+                  Cancel
+                </button>
               </div>
             </div>
           </div>
         )}
+
+        {Object.entries(cursors).map(([socketId, cursor]) => (
+          <div
+            key={socketId}
+            style={{
+              position: "absolute",
+              left: cursor.x,
+              top: cursor.y,
+              pointerEvents: "none",
+              zIndex: 9999,
+            }}
+          >
+            <div
+              style={{
+                position: "absolute",
+                top: "-20px",
+                left: "8px",
+                background: "black",
+                color: "white",
+                fontSize: "12px",
+                padding: "2px 6px",
+                borderRadius: "4px",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {cursor.name || "User"}
+            </div>
+
+            <div
+              style={{
+                width: "10px",
+                height: "10px",
+                backgroundColor: "red",
+                borderRadius: "50%",
+              }}
+            />
+          </div>
+        ))}
       </div>
 
-      {/* ── Status bar ── */}
       <div style={{ padding: "4px 10px", fontSize: 11, color: "#6b7280", marginTop: 4 }}>
         {elements.length} element{elements.length !== 1 ? "s" : ""} on board
-        {selectedId ? " · 1 selected (Delete key to remove, drag to move, drag handles to resize)" : ""}
-        {tool === "text" ? " · Click canvas to add text, double-click existing text to edit" : ""}
+        {selectedId ? " · 1 selected" : ""}
       </div>
-
-      {Object.entries(cursors).map(
-  ([id, pos]) => (
-    <div
-      key={id}
-      style={{
-        position: "fixed",
-        left: `${pos.x}px`,
-        top: `${pos.y}px`,
-        width: "20px",
-        height: "20px",
-        background: "red",
-        borderRadius: "50%",
-        zIndex: 99999,
-        pointerEvents: "none",
-      }}
-    />
-  )
-)}
-<h1
-  style={{
-    position: "fixed",
-    top: 0,
-    right: 0,
-    zIndex: 99999,
-    background: "yellow"
-  }}
->
-  {Object.keys(cursors).length}
-</h1>
     </div>
-
-
- 
   );
 }
 
 export default Canvas;
-

@@ -4,26 +4,18 @@ const redisClient =
 
 const authMiddleware =
   async (req,res,next) => {
-    console.log("AUTH HIT");
 
   try {
 
     const authHeader =
       req.headers.authorization;
-
-      console.log(
-  "Header:",
-  authHeader
-);
-
     if (!authHeader) {
       return res.status(401).json({
         message: "No token provided",
       });
     }
 
-    const token =
-      authHeader.split(" ")[1];
+    const token =authHeader.split(" ")[1];
 
     const blacklisted =
       await redisClient.get(
@@ -45,7 +37,6 @@ const authMiddleware =
     req.user = decoded;
 
     next();
-    console.log("NEXT CALLED");
 
   } catch (error) {
     console.log(error);
