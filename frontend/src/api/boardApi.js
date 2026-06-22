@@ -17,10 +17,7 @@ export const getBoard = (id) =>
 export const updateBoard = (id, title, elements) =>
   axios.put(
     `${BASE_URL}/${id}`,
-    {
-      title,
-      elements,
-    },
+    { title, elements },
     getAuthConfig()
   );
 
