@@ -1,21 +1,28 @@
 import { useState } from "react";
 import { register } from "../api/authApi";
 import { useNavigate } from "react-router-dom";
-
+import { useToast } from "../components/ui/ToastProvider";
 
 function Register() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-    const navigate = useNavigate();
-    
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState("");
+
+  const navigate = useNavigate();
+  const toast = useToast();
+
   const handleRegister = async () => {
     try {
-        
-        if (!name || !email || !password) {
-            alert("Please fill all fields");
-            return;
-        }
+      setFormError("");
+
+      if (!name || !email || !password) {
+        setFormError("Please fill all fields.");
+        return;
+      }
+
+      setSubmitting(true);
 
       await register({
         name,
@@ -23,155 +30,205 @@ function Register() {
         password,
       });
 
-      alert("Registration Successful");
-
-      const redirectPath =localStorage.getItem("redirectAfterLogin");
-
-      if (redirectPath) {
-        navigate(
-          `/login`
-        );
-      } else {
-        navigate("/login");
-      }
-
+      toast.success("Registration successful");
+      navigate("/login");
     } catch (error) {
       console.log("REGISTER ERROR:", error);
       console.log("REGISTER RESPONSE:", error.response?.data);
 
-      alert(
+      const msg =
         error.response?.data?.message ||
         error.response?.data?.error ||
         error.message ||
-        "Registration Failed"
-      );
+        "Registration Failed";
+
+      setFormError(msg);
+      toast.error(msg);
+    } finally {
+      setSubmitting(false);
     }
   };
 
   return (
-    <div style={{
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      minHeight: "100vh",
-      backgroundColor: "#f9fafb",
-      fontFamily: "system-ui, -apple-system, sans-serif"
-    }}>
-      <div style={{
-        backgroundColor: "#ffffff",
-        padding: "40px",
-        borderRadius: "12px",
-        boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)",
-        width: "100%",
-        maxWidth: "380px",
-        boxSizing: "border-box"
-      }}>
-        
-        <h2 style={{
-          margin: "0 0 24px 0",
-          fontSize: "24px",
-          fontWeight: 600,
-          color: "#111827",
-          textAlign: "center"
-        }}>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        minHeight: "100vh",
+        backgroundColor: "#f9fafb",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+        padding: "16px",
+      }}
+    >
+      <div
+        style={{
+          backgroundColor: "#ffffff",
+          padding: "40px",
+          borderRadius: "16px",
+          boxShadow:
+            "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)",
+          width: "100%",
+          maxWidth: "380px",
+          boxSizing: "border-box",
+        }}
+      >
+        <h2
+          style={{
+            margin: "0 0 24px 0",
+            fontSize: "24px",
+            fontWeight: 700,
+            color: "#111827",
+            textAlign: "center",
+          }}
+        >
           Create an Account
         </h2>
 
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          
           <div>
-            <label style={{ display: "block", fontSize: "13px", fontWeight: 500, color: "#374151", marginBottom: "6px" }}>
+            <label
+              style={{
+                display: "block",
+                fontSize: "13px",
+                fontWeight: 500,
+                color: "#374151",
+                marginBottom: "6px",
+              }}
+            >
               Full Name
             </label>
             <input
               type="text"
               placeholder="John Doe"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value);
+                if (formError) setFormError("");
+              }}
               style={{
                 width: "100%",
                 padding: "10px 12px",
-                border: "1px solid #d1d5db",
-                borderRadius: "6px",
+                border: `1px solid ${formError ? "#fca5a5" : "#d1d5db"}`,
+                borderRadius: "8px",
                 fontSize: "14px",
                 outline: "none",
                 boxSizing: "border-box",
-                transition: "border-color 0.2s"
               }}
             />
           </div>
 
           <div>
-            <label style={{ display: "block", fontSize: "13px", fontWeight: 500, color: "#374151", marginBottom: "6px" }}>
+            <label
+              style={{
+                display: "block",
+                fontSize: "13px",
+                fontWeight: 500,
+                color: "#374151",
+                marginBottom: "6px",
+              }}
+            >
               Email Address
             </label>
             <input
               type="email"
               placeholder="you@example.com"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                if (formError) setFormError("");
+              }}
               style={{
                 width: "100%",
                 padding: "10px 12px",
-                border: "1px solid #d1d5db",
-                borderRadius: "6px",
+                border: `1px solid ${formError ? "#fca5a5" : "#d1d5db"}`,
+                borderRadius: "8px",
                 fontSize: "14px",
                 outline: "none",
                 boxSizing: "border-box",
-                transition: "border-color 0.2s"
               }}
             />
           </div>
 
           <div>
-            <label style={{ display: "block", fontSize: "13px", fontWeight: 500, color: "#374151", marginBottom: "6px" }}>
+            <label
+              style={{
+                display: "block",
+                fontSize: "13px",
+                fontWeight: 500,
+                color: "#374151",
+                marginBottom: "6px",
+              }}
+            >
               Password
             </label>
             <input
               type="password"
               placeholder="••••••••"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                if (formError) setFormError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleRegister();
+              }}
               style={{
                 width: "100%",
                 padding: "10px 12px",
-                border: "1px solid #d1d5db",
-                borderRadius: "6px",
+                border: `1px solid ${formError ? "#fca5a5" : "#d1d5db"}`,
+                borderRadius: "8px",
                 fontSize: "14px",
                 outline: "none",
                 boxSizing: "border-box",
-                transition: "border-color 0.2s"
               }}
             />
           </div>
 
-          <button 
+          {formError && (
+            <div
+              style={{
+                background: "#fef2f2",
+                border: "1px solid #fecaca",
+                color: "#b91c1c",
+                borderRadius: "8px",
+                padding: "10px 12px",
+                fontSize: "13px",
+                fontWeight: 500,
+              }}
+            >
+              {formError}
+            </div>
+          )}
+
+          <button
             onClick={handleRegister}
+            disabled={submitting}
             style={{
               width: "100%",
               padding: "10px",
               marginTop: "8px",
-              backgroundColor: "#3b82f6",
+              backgroundColor: submitting ? "#93c5fd" : "#3b82f6",
               color: "white",
               fontWeight: 600,
               fontSize: "14px",
               border: "none",
-              borderRadius: "6px",
-              cursor: "pointer",
-              transition: "background-color 0.2s"
+              borderRadius: "8px",
+              cursor: submitting ? "not-allowed" : "pointer",
             }}
           >
-            Register
+            {submitting ? "Registering..." : "Register"}
           </button>
-
         </div>
 
-        <div style={{ 
-          marginTop: "24px", 
-          textAlign: "center", 
-          fontSize: "14px", 
-          color: "#6b7280" 
-        }}>
+        <div
+          style={{
+            marginTop: "24px",
+            textAlign: "center",
+            fontSize: "14px",
+            color: "#6b7280",
+          }}
+        >
           <p style={{ margin: "0 0 8px 0" }}>
             Already have an account?
           </p>
@@ -186,13 +243,12 @@ function Register() {
               fontWeight: 600,
               fontSize: "14px",
               cursor: "pointer",
-              padding: 0
+              padding: 0,
             }}
           >
             Sign In
           </button>
         </div>
-
       </div>
     </div>
   );
