@@ -7,18 +7,20 @@ const AccessRequest =require("../models/AccessRequest");
 const createBoard = async (req, res) => {
   try {
     const board = await Board.create({
-      title: req.body.title,
+      title: req.body.title || "Untitled Board",
       owner: req.user.userId,
       elements: [],
     });
 
-    await redisClient.del(
-  `boards:${req.user.userId}`
-);
-
+    try {
+      await redisClient.del(`boards:${req.user.userId}`);
+    } catch (redisError) {
+      console.warn("[Board] Redis del failed in createBoard:", redisError.message);
+    }
 
     res.status(201).json(board);
   } catch (error) {
+    console.error("[Board] createBoard error:", error);
     res.status(500).json({
       message: error.message,
     });
@@ -26,60 +28,66 @@ const createBoard = async (req, res) => {
 };
 
 const getBoardById = async (req, res) => {
+  try {
+    const cacheKey = `board:${req.params.id}`;
+
     try {
-
-        const cacheKey =`board:${req.params.id}`;
-
-        const board = await Board.findById(
-            req.params.id
+      const cachedBoard = await redisClient.get(cacheKey);
+      if (cachedBoard) {
+        const parsed = JSON.parse(cachedBoard);
+        const isOwner =
+          (parsed.owner?._id ? parsed.owner._id.toString() : parsed.owner?.toString()) ===
+          req.user.userId;
+        const isMember = (parsed.members || []).some(
+          (m) => (m._id ? m._id.toString() : m.toString()) === req.user.userId
         );
 
-        if (!board) {
-            return res.status(404).json({
-                message: "Board not found"
+        if (!isOwner && !isMember) {
+          return res.status(403).json({
+            message: "Access denied",
           });
         }
 
-        const isOwner =board.owner.toString() ===req.user.userId;
-
-        const isMember =
-            board.members.some(
-                (memberId) =>
-                    memberId.toString() ===
-                    req.user.userId
-            );
-
-        if (!isOwner && !isMember) {
-            return res.status(403).json({
-                message: "Access denied",
-            });
-        }
-
-
-      const cachedBoard =await redisClient.get(cacheKey);
-
-      if (cachedBoard) {
-          return res.status(200).json(
-              JSON.parse(cachedBoard)
-          );
+        return res.status(200).json(parsed);
       }
-
-
-        await redisClient.set(
-            cacheKey,
-            JSON.stringify(board),
-            {
-                EX: 3600,
-            }
-        );
-
-        res.status(200).json(board);
-
-    } catch (error) {
-        res.status(500).json({
-            message: error.message
-        });
+    } catch (redisError) {
+      console.warn("[Board] Redis get failed in getBoardById:", redisError.message);
     }
+
+    const board = await Board.findById(req.params.id);
+
+    if (!board) {
+      return res.status(404).json({
+        message: "Board not found",
+      });
+    }
+
+    const isOwner = board.owner.toString() === req.user.userId;
+    const isMember = (board.members || []).some(
+      (memberId) => memberId.toString() === req.user.userId
+    );
+
+    if (!isOwner && !isMember) {
+      return res.status(403).json({
+        message: "Access denied",
+      });
+    }
+
+    try {
+      await redisClient.set(cacheKey, JSON.stringify(board), {
+        EX: 3600,
+      });
+    } catch (redisError) {
+      console.warn("[Board] Redis set failed in getBoardById:", redisError.message);
+    }
+
+    res.status(200).json(board);
+  } catch (error) {
+    console.error("[Board] getBoardById error:", error);
+    res.status(500).json({
+      message: error.message,
+    });
+  }
 };
 
 const updateBoard = async (req, res) => {
@@ -122,15 +130,15 @@ const updateBoard = async (req, res) => {
       await redisClient.del(`board:${req.params.id}`);
       await redisClient.del(`boards:${board.owner.toString()}`);
     } catch (redisError) {
-      console.error(
-        "Redis cache delete failed in updateBoard:",
+      console.warn(
+        "[Board] Redis cache delete failed in updateBoard:",
         redisError.message
       );
     }
 
     res.status(200).json(updatedBoard);
   } catch (error) {
-    console.error("updateBoard error:", error);
+    console.error("[Board] updateBoard error:", error);
     res.status(500).json({
       message: error.message,
     });
@@ -138,62 +146,77 @@ const updateBoard = async (req, res) => {
 };
 
 const deleteBoard = async (req, res) => {
-    try {
-        const board = await Board.findById(
-            req.params.id
-        );
+  try {
+    const board = await Board.findById(req.params.id);
 
-        if (!board) {
-            return res.status(404).json({
-                message: "Board not found",
-            });
-        }
-
-        await board.deleteOne();
-
-        await redisClient.del(`board:${req.params.id}`);
-        await redisClient.del(`boards:${req.user.userId}`);
-
-        res.status(200).json({
-            message: "Board deleted successfully",
-        });
-
-    } catch (error) {
-        res.status(500).json({
-            message: error.message,
-        });
+    if (!board) {
+      return res.status(404).json({
+        message: "Board not found",
+      });
     }
+
+    if (board.owner.toString() !== req.user.userId) {
+      return res.status(403).json({
+        message: "Not authorized to delete this board",
+      });
+    }
+
+    await board.deleteOne();
+
+    try {
+      await redisClient.del(`board:${req.params.id}`);
+      await redisClient.del(`boards:${req.user.userId}`);
+    } catch (redisError) {
+      console.warn(
+        "[Board] Redis cache delete failed in deleteBoard:",
+        redisError.message
+      );
+    }
+
+    res.status(200).json({
+      message: "Board deleted successfully",
+    });
+  } catch (error) {
+    console.error("[Board] deleteBoard error:", error);
+    res.status(500).json({
+      message: error.message,
+    });
+  }
 };
 
 const getBoards = async (req, res) => {
   try {
+    const cacheKey = `boards:${req.user.userId}`;
 
-    const cacheKey =`boards:${req.user.userId}`;
-
-    const cachedBoards =await redisClient.get(cacheKey);
-
-    if (cachedBoards) {
-      return res.json(
-        JSON.parse(cachedBoards)
-      );
+    try {
+      const cachedBoards = await redisClient.get(cacheKey);
+      if (cachedBoards) {
+        return res.json(JSON.parse(cachedBoards));
+      }
+    } catch (redisError) {
+      console.warn("[Board] Redis get failed in getBoards:", redisError.message);
     }
 
     const boards = await Board.find({
-      owner: req.user.userId,
+      $or: [
+        { owner: req.user.userId },
+        { members: req.user.userId },
+      ],
     })
-    .select("_id title updatedAt")
-    .sort({ updatedAt: -1 });
+      .select("_id title updatedAt")
+      .sort({ updatedAt: -1 });
 
-    await redisClient.set(
-        cacheKey,
-        JSON.stringify(boards),
-        {
-            EX: 3600,
-        }
-    );
+    try {
+      await redisClient.set(cacheKey, JSON.stringify(boards), {
+        EX: 3600,
+      });
+    } catch (redisError) {
+      console.warn("[Board] Redis set failed in getBoards:", redisError.message);
+    }
+
     res.json(boards);
-
   } catch (error) {
+    console.error("[Board] getBoards error:", error);
     res.status(500).json({
       message: error.message,
     });

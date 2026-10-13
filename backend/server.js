@@ -34,6 +34,14 @@ const isAllowedOrigin = (origin) => {
   // exact allowed origins
   if (allowedOrigins.includes(origin)) return true;
 
+  // allow any localhost / 127.0.0.1 port for local development
+  if (
+    origin.startsWith("http://localhost:") ||
+    origin.startsWith("http://127.0.0.1:")
+  ) {
+    return true;
+  }
+
   // allow all Vercel deployments for this project
   if (
     origin.endsWith(".vercel.app") &&

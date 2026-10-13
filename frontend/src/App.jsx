@@ -20,13 +20,28 @@ import socket from "./socket";
 import { useToast } from "./components/ui/ToastProvider";
 import ConfirmModal from "./components/ui/ConfirmModal";
 
+const getUserIdFromToken = (tok) => {
+  try {
+    if (!tok || typeof tok !== "string") return null;
+    const parts = tok.split(".");
+    if (parts.length < 2) return null;
+    return JSON.parse(atob(parts[1])).userId || null;
+  } catch {
+    return null;
+  }
+};
+
 function App() {
   const [elements, setElements] = useState([]);
   const [boards, setBoards] = useState([]);
   const { id } = useParams();
   const navigate = useNavigate();
   const [boardTitle, setBoardTitle] = useState("");
-  const token = localStorage.getItem("token");
+  const rawToken = localStorage.getItem("token");
+  const token =
+    rawToken && rawToken !== "null" && rawToken !== "undefined"
+      ? rawToken
+      : null;
   const [usersCount, setUsersCount] = useState(0);
   const [cursors, setCursors] = useState({});
   const [inviteEmail, setInviteEmail] = useState("");
@@ -83,6 +98,13 @@ function App() {
       setBoards(res.data);
     } catch (error) {
       console.log(error);
+      if (error.response?.status === 401) {
+        localStorage.removeItem("token");
+        localStorage.removeItem("name");
+        navigate("/login");
+        toast.error("Session expired. Please log in again.");
+        return;
+      }
       toast.error("Failed to load boards");
     }
   };
@@ -133,7 +155,7 @@ function App() {
     const interval = setInterval(async () => {
       try {
         const res = await getBoard(id);
-        const currentUserId = JSON.parse(atob(token.split(".")[1])).userId;
+        const currentUserId = getUserIdFromToken(token);
 
         setElements(res.data.elements || []);
         setBoardTitle(res.data.title || "");
@@ -302,15 +324,6 @@ function App() {
     fetchMembers();
   }, [id, isOwner, accessDenied]);
 
-  if (!token) {
-    localStorage.setItem(
-      "redirectAfterLogin",
-      window.location.pathname
-    );
-
-    return <Navigate to="/login" />;
-  }
-
   useEffect(() => {
     if (!token) return;
 
@@ -320,7 +333,7 @@ function App() {
         if (!boardId) return;
 
         const res = await getBoard(boardId);
-        const currentUserId = JSON.parse(atob(token.split(".")[1])).userId;
+        const currentUserId = getUserIdFromToken(token);
 
         setAccessDenied(false);
         setIsOwner(res.data.owner === currentUserId);
@@ -334,6 +347,13 @@ function App() {
         }
       } catch (error) {
         setElements([]);
+        if (error.response?.status === 401) {
+          localStorage.removeItem("token");
+          localStorage.removeItem("name");
+          navigate("/login");
+          toast.error("Session expired. Please log in again.");
+          return;
+        }
         if (error.response?.status === 403) {
           setAccessDenied(true);
           setIsOwner(false);
@@ -357,6 +377,13 @@ function App() {
       toast.success("Board created");
     } catch (error) {
       console.log(error);
+      if (error.response?.status === 401) {
+        localStorage.removeItem("token");
+        localStorage.removeItem("name");
+        navigate("/login");
+        toast.error("Session expired. Please log in again.");
+        return;
+      }
       toast.error("Failed to create board");
     }
   };
@@ -375,9 +402,25 @@ function App() {
       toast.success("Board saved");
     } catch (error) {
       console.log(error);
+      if (error.response?.status === 401) {
+        localStorage.removeItem("token");
+        localStorage.removeItem("name");
+        navigate("/login");
+        toast.error("Session expired. Please log in again.");
+        return;
+      }
       toast.error("Failed to save board");
     }
   };
+
+  if (!token) {
+    localStorage.setItem(
+      "redirectAfterLogin",
+      window.location.pathname
+    );
+
+    return <Navigate to="/login" />;
+  }
 
   return (
     <div
